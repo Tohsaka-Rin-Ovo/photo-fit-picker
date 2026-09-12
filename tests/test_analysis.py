@@ -21,7 +21,12 @@ from photo_fit_picker.analysis import (
     hamming_distance,
     visual_similarity,
 )
-from photo_fit_picker.models import AnalysisOptions, PhotoGroup, PhotoRecord
+from photo_fit_picker.models import (
+    AnalysisOptions,
+    PhotoGroup,
+    PhotoRecord,
+    format_file_size,
+)
 
 
 def make_photo(name: str, hash_value: int, seconds: int, color: tuple[float, ...]) -> PhotoRecord:
@@ -101,6 +106,21 @@ class AnalysisTests(unittest.TestCase):
             discovered = {path.name for path in discover_images(folder)}
 
             self.assertEqual(discovered, {"canon.CR3", "nikon.nef"})
+
+    def test_symbolic_linked_photos_are_not_discovered(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            outside = root / "outside.jpg"
+            outside.write_bytes(b"photo")
+            folder = root / "source"
+            folder.mkdir()
+            link = folder / "linked.jpg"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError):
+                self.skipTest("symbolic links are not available")
+
+            self.assertEqual(discover_images(folder), [])
 
     def test_raw_embedded_preview_is_used_for_analysis(self) -> None:
         buffer = BytesIO()
@@ -193,6 +213,7 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(photo.file_size_label, "12.0 MB")
         self.assertEqual(photo.dimension_label, "4000 × 3000")
         self.assertEqual(photo.quality_summary, "清晰 · 曝光均衡")
+        self.assertEqual(format_file_size(5 * 1024**4), "5.0 TB")
 
     def test_similar_burst_photos_are_grouped(self) -> None:
         neutral = tuple([1 / 48] * 48)

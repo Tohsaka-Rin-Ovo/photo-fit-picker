@@ -237,7 +237,9 @@ def discover_images(folder: Path, recursive: bool = True) -> list[Path]:
     return sorted(
         path
         for path in iterator
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        if path.is_file()
+        and not path.is_symlink()
+        and path.suffix.lower() in SUPPORTED_EXTENSIONS
     )
 
 

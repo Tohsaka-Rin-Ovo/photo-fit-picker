@@ -82,6 +82,26 @@ class FileOperationTests(unittest.TestCase):
             self.assertEqual(trashed_path, source.resolve())
             self.assertEqual(record.status, ReviewStatus.TRASHED)
 
+    def test_symbolic_link_is_never_moved_or_trashed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            target = root / "target.jpg"
+            target.write_bytes(b"original")
+            link = root / "linked.jpg"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("symbolic links are not available")
+            record = make_photo(link, ReviewStatus.KEPT)
+
+            with self.assertRaisesRegex(OSError, "符号链接"):
+                move_selected([record], root / "picked")
+            with self.assertRaisesRegex(OSError, "符号链接"):
+                move_photo_to_trash(record)
+
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(target.read_bytes(), b"original")
+
     def test_failed_trash_does_not_change_photo_status(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             source = Path(temporary_directory) / "protected.jpg"

@@ -81,7 +81,13 @@ from .fileops import (
     read_history,
     undo_last_move,
 )
-from .models import AnalysisOptions, PhotoGroup, PhotoRecord, ReviewStatus
+from .models import (
+    AnalysisOptions,
+    PhotoGroup,
+    PhotoRecord,
+    ReviewStatus,
+    format_file_size,
+)
 from .organizer import OrganizationGroup, OrganizationPlan, build_organization_plan
 from .session import ReviewSessionStore, ReviewSessionSummary
 from .worker import AnalysisWorker
@@ -2270,12 +2276,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "没有可移动文件", "整理计划中的照片已不存在。")
             return
         photo_count = sum(len(group.photos) for group in plan.groups)
+        photo_size = format_file_size(
+            sum(photo.file_size for group in plan.groups for photo in group.photos)
+        )
         linked_count = max(0, len(planned) - photo_count)
         linked_text = f"，另含 {linked_count} 个关联文件" if linked_count else ""
         answer = QMessageBox.question(
             self,
             "确认执行整理",
-            f"将 {photo_count} 张照片{linked_text}整理到：\n"
+            f"将 {photo_count} 张照片（约 {photo_size}）{linked_text}整理到：\n"
             f"{self.destination_folder}\n\n"
             f"将创建 {len(plan.groups)} 个建议文件夹。不会删除或覆盖任何文件，"
             "完成后可使用撤销按钮恢复。",
@@ -2777,7 +2786,8 @@ class MainWindow(QMainWindow):
             self,
             "确认批量移到回收站",
             f"确定要将选中的 {len(selected)} 张照片移到"
-            "系统废纸篓/回收站吗？\n\n"
+            f"系统废纸篓/回收站吗？共约 "
+            f"{format_file_size(sum(photo.file_size for photo in selected))}。\n\n"
             "这不是永久删除，可从系统废纸篓/回收站恢复。",
         )
         if not confirmed:
@@ -2833,10 +2843,12 @@ class MainWindow(QMainWindow):
             return
         linked_count = max(0, len(linked_records) - len(selected))
         linked_text = f"（含 {linked_count} 张关联 RAW/JPEG）" if linked_count else ""
+        move_size = format_file_size(sum(photo.file_size for photo in linked_records))
         answer = QMessageBox.question(
             self,
             "确认批量移动",
-            f"将选中的 {len(selected)} 张照片{linked_text}移动到：\n{destination_path}\n\n"
+            f"将选中的 {len(selected)} 张照片{linked_text}（约 {move_size}）移动到：\n"
+            f"{destination_path}\n\n"
             "同名 XMP sidecar 会一同移动；"
             "移动后可通过顶部撤销按钮恢复。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
@@ -2854,7 +2866,7 @@ class MainWindow(QMainWindow):
             return
         self.destination_folder = destination_path
         self._update_destination_ui()
-        self.statusBar().showMessage(f"已移动 {len(moved)} 张照片", 8000)
+        self.statusBar().showMessage(f"已移动 {len(moved)} 个文件", 8000)
         for card in self.cards:
             card.sync_status()
         self._selection_changed()
@@ -2908,10 +2920,12 @@ class MainWindow(QMainWindow):
                 "目标文件夹不能与保留照片当前所在的文件夹相同。",
             )
             return
+        move_size = format_file_size(sum(photo.file_size for photo in linked_records))
         answer = QMessageBox.question(
             self,
             "确认移动照片",
-            f"将 {len(kept)} 张照片移动到：\n{self.destination_folder}\n\n"
+            f"将 {len(kept)} 张照片（约 {move_size}）移动到：\n"
+            f"{self.destination_folder}\n\n"
             "移动后可以使用左上角的撤销按钮恢复。",
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -2926,7 +2940,7 @@ class MainWindow(QMainWindow):
             )
             self._update_summary()
             return
-        self.statusBar().showMessage(f"已移动 {len(moved)} 张照片", 8000)
+        self.statusBar().showMessage(f"已移动 {len(moved)} 个文件", 8000)
         self._refresh_group_labels()
         self._update_summary()
         self._show_group_at_row(self.group_list.currentRow())

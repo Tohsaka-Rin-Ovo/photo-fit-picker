@@ -7,6 +7,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
+def format_file_size(file_size: int) -> str:
+    size = float(max(0, file_size))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            precision = 0 if unit == "B" else 1
+            return f"{size:.{precision}f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
 class ReviewStatus(str, Enum):
     PENDING = "pending"
     KEPT = "kept"
@@ -104,13 +114,7 @@ class PhotoRecord:
 
     @property
     def file_size_label(self) -> str:
-        size = float(self.file_size)
-        for unit in ("B", "KB", "MB", "GB"):
-            if size < 1024 or unit == "GB":
-                precision = 0 if unit == "B" else 1
-                return f"{size:.{precision}f} {unit}"
-            size /= 1024
-        return f"{size:.1f} GB"
+        return format_file_size(self.file_size)
 
     @property
     def format_label(self) -> str:

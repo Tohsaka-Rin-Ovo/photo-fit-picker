@@ -106,6 +106,8 @@ def _write_history(destination: Path, entries: list[MoveEntry]) -> None:
 
 
 def linked_asset_paths(path: Path) -> list[Path]:
+    if path.is_symlink():
+        raise OSError(f"为保护链接目标，不会移动符号链接：{path}")
     source = path.resolve()
     if not source.is_file():
         return []
@@ -119,6 +121,7 @@ def linked_asset_paths(path: Path) -> list[Path]:
             sibling.resolve()
             for sibling in siblings
             if sibling.is_file()
+            and not sibling.is_symlink()
             and sibling.stem.casefold() == stem
             and sibling.suffix.lower() in LINKED_EXTENSIONS
         ),
@@ -320,6 +323,8 @@ def execute_organization_plan(
 
 def move_photo_to_trash(photo: PhotoRecord) -> Path:
     """Move one explicitly selected photo to the operating system trash."""
+    if photo.path.is_symlink():
+        raise OSError(f"为保护链接目标，不会移动符号链接：{photo.path}")
     source = photo.path.resolve()
     if not source.is_file():
         raise FileNotFoundError(f"找不到照片：{source}")
