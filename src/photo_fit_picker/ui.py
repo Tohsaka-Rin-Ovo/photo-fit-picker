@@ -715,41 +715,29 @@ class SettingsView(QWidget):
         self.source_folder = source_folder
         self.setObjectName("settingsView")
 
-        root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(32, 24, 32, 28)
-        root_layout.setSpacing(22)
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        heading = QHBoxLayout()
-        heading.setSpacing(12)
-        back_button = FeedbackToolButton()
+        sidebar = QFrame()
+        sidebar.setObjectName("settingsSidebar")
+        sidebar.setFixedWidth(228)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 22, 14, 16)
+        sidebar_layout.setSpacing(10)
+
+        back_button = FeedbackButton("返回照片")
         back_button.setObjectName("settingsBackButton")
         back_button.setIcon(_icon("arrow-left"))
-        back_button.setIconSize(QSize(20, 20))
-        back_button.setToolTip("返回照片")
+        back_button.setIconSize(QSize(18, 18))
         back_button.setAccessibleName("返回照片")
         back_button.clicked.connect(self.back_requested.emit)
-        heading.addWidget(back_button, alignment=Qt.AlignmentFlag.AlignTop)
+        sidebar_layout.addWidget(back_button)
 
-        title_box = QVBoxLayout()
-        title_box.setSpacing(3)
         title = QLabel("设置")
         title.setObjectName("settingsTitle")
-        subtitle = QLabel("让拾影按照你的工作方式运行")
-        subtitle.setObjectName("settingsSubtitle")
-        title_box.addWidget(title)
-        title_box.addWidget(subtitle)
-        heading.addLayout(title_box)
-        heading.addStretch()
-        version = QLabel(f"拾影 {__version__}")
-        version.setObjectName("settingsVersion")
-        heading.addWidget(version, alignment=Qt.AlignmentFlag.AlignTop)
-        root_layout.addLayout(heading)
+        sidebar_layout.addWidget(title)
 
-        navigation = QFrame()
-        navigation.setObjectName("settingsTabs")
-        navigation_layout = QHBoxLayout(navigation)
-        navigation_layout.setContentsMargins(3, 3, 3, 3)
-        navigation_layout.setSpacing(2)
         self.navigation_buttons: list[FeedbackButton] = []
         for index, (text, icon_name) in enumerate(
             (
@@ -759,22 +747,36 @@ class SettingsView(QWidget):
             )
         ):
             button = FeedbackButton(text)
-            button.setObjectName("settingsTab")
+            button.setObjectName("settingsNavButton")
             button.setIcon(_icon(icon_name, ICON_MUTED))
-            button.setIconSize(QSize(17, 17))
+            button.setIconSize(QSize(18, 18))
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, row=index: self._select_page(row))
-            navigation_layout.addWidget(button)
+            sidebar_layout.addWidget(button)
             self.navigation_buttons.append(button)
-        root_layout.addWidget(navigation, alignment=Qt.AlignmentFlag.AlignLeft)
+        sidebar_layout.addStretch()
+
+        version = QLabel(f"拾影 {__version__}")
+        version.setObjectName("settingsVersion")
+        sidebar_layout.addWidget(version)
+        root_layout.addWidget(sidebar)
+
+        content = QWidget()
+        content.setObjectName("settingsContent")
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(42, 42, 42, 32)
+        content_layout.setSpacing(0)
+        content_layout.addStretch()
 
         self.pages = QStackedWidget()
         self.pages.setObjectName("settingsPages")
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_folder_page())
         self.pages.addWidget(self._build_review_page())
-        self.pages.setMaximumWidth(780)
-        root_layout.addWidget(self.pages, 1)
+        self.pages.setMaximumWidth(760)
+        content_layout.addWidget(self.pages, 1)
+        content_layout.addStretch()
+        root_layout.addWidget(content, 1)
         self._select_page(0)
 
     def _page(self, title: str, hint: str) -> tuple[QWidget, QVBoxLayout]:
@@ -822,7 +824,7 @@ class SettingsView(QWidget):
         return divider
 
     def _build_appearance_page(self) -> QWidget:
-        page, layout = self._page("显示", "选择更适合看照片的界面，并控制交互动画。")
+        page, layout = self._page("外观", "选择更适合看照片的界面，并控制交互动画。")
         group, group_layout = self._group()
 
         theme_row = QHBoxLayout()
@@ -863,7 +865,7 @@ class SettingsView(QWidget):
         return page
 
     def _build_folder_page(self) -> QWidget:
-        page, layout = self._page("文件位置", "管理正在审阅的照片和默认输出位置。")
+        page, layout = self._page("文件夹", "管理正在审阅的照片和默认输出位置。")
         source_group, source_layout = self._group()
         source_row = QHBoxLayout()
         source_name = str(self.source_folder) if self.source_folder else "尚未选择照片文件夹"
@@ -933,7 +935,7 @@ class SettingsView(QWidget):
         return page
 
     def _build_review_page(self) -> QWidget:
-        page, layout = self._page("分析规则", "调整相似照片成组时使用的判断范围。")
+        page, layout = self._page("筛选", "调整相似照片成组时使用的判断范围。")
         group, group_layout = self._group()
 
         similarity_row = QHBoxLayout()
@@ -1097,9 +1099,12 @@ class MainWindow(QMainWindow):
         self._show_empty_state()
 
     def _build_ui(self) -> None:
-        root = QWidget()
-        root.setObjectName("appRoot")
-        root_layout = QVBoxLayout(root)
+        self.root_stack = QStackedWidget()
+        self.root_stack.setObjectName("rootStack")
+
+        self.workspace = QWidget()
+        self.workspace.setObjectName("appRoot")
+        root_layout = QVBoxLayout(self.workspace)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
@@ -1152,7 +1157,14 @@ class MainWindow(QMainWindow):
         self.main_splitter.setSizes([232, 1048])
         root_layout.addWidget(self.main_splitter, 1)
 
-        self.setCentralWidget(root)
+        self.root_stack.addWidget(self.workspace)
+        self.settings_view = SettingsView(self.source_folder, self)
+        self.settings_view.back_requested.connect(self._close_settings)
+        self.settings_view.source_requested.connect(self._choose_source_from_settings)
+        self.settings_view.reanalyze_requested.connect(self._reanalyze_from_settings)
+        self.settings_view.preferences_changed.connect(self._settings_changed)
+        self.root_stack.addWidget(self.settings_view)
+        self.setCentralWidget(self.root_stack)
         status = QStatusBar()
         self.progress = QProgressBar()
         self.progress.setFixedWidth(220)
@@ -1414,12 +1426,6 @@ class MainWindow(QMainWindow):
         self.batch_bar.hide()
         self.content_stack.addWidget(review)
 
-        self.settings_view = SettingsView(self.source_folder, self)
-        self.settings_view.back_requested.connect(self._close_settings)
-        self.settings_view.source_requested.connect(self._choose_source_from_settings)
-        self.settings_view.reanalyze_requested.connect(self._reanalyze_from_settings)
-        self.settings_view.preferences_changed.connect(self._settings_changed)
-        self.content_stack.addWidget(self.settings_view)
         return self.content_stack
 
     def _build_shortcuts(self) -> None:
@@ -1449,7 +1455,7 @@ class MainWindow(QMainWindow):
         self.undo_button.setEnabled(False)
 
     def _open_settings(self) -> None:
-        if self.content_stack.currentWidget() is self.settings_view:
+        if self.root_stack.currentWidget() is self.settings_view:
             self.settings_button.setChecked(True)
             return
         self._settings_return_index = 1 if self.groups else 0
@@ -1459,25 +1465,16 @@ class MainWindow(QMainWindow):
             self.source_folder is not None,
             self.analysis_thread is not None and self.analysis_thread.isRunning(),
         )
-        self.folder_button.hide()
-        self.sidebar_review_panel.hide()
-        self.undo_button.hide()
-        self.move_button.hide()
         self.settings_button.setChecked(True)
-        self.source_label.setText("偏好设置")
-        self.source_label.setToolTip("")
-        self.content_stack.setCurrentWidget(self.settings_view)
+        self.statusBar().hide()
+        self.root_stack.setCurrentWidget(self.settings_view)
 
     def _close_settings(self) -> None:
         self._load_preferences()
         self._update_destination_ui()
         self.settings_button.setChecked(False)
-        if self.source_folder:
-            self.source_label.setText(self.source_folder.name)
-            self.source_label.setToolTip(str(self.source_folder))
-        else:
-            self.source_label.setText("本地照片筛选")
-            self.source_label.setToolTip("")
+        self.root_stack.setCurrentWidget(self.workspace)
+        self.statusBar().show()
         if self.groups and self._settings_return_index == 1:
             self._apply_group_filter()
         else:
@@ -1502,7 +1499,7 @@ class MainWindow(QMainWindow):
         self._start_analysis()
 
     def _handle_escape(self) -> None:
-        if self.content_stack.currentWidget() is self.settings_view:
+        if self.root_stack.currentWidget() is self.settings_view:
             self._close_settings()
         else:
             self._clear_selection()
@@ -1665,7 +1662,7 @@ class MainWindow(QMainWindow):
         self.settings_view.set_analysis_available(self.source_folder is not None, False)
 
     def _apply_group_filter(self) -> None:
-        settings_open = self.content_stack.currentWidget() is self.settings_view
+        settings_open = self.root_stack.currentWidget() is self.settings_view
         mode = self.group_filter.currentData()
         if mode == "pending":
             self.visible_groups = [group for group in self.groups if not group.reviewed]
@@ -2508,64 +2505,64 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             color: #ffffff;
             background: #343a40;
         }
-        #settingsView, #settingsPages, #settingsPage {
+        #settingsView, #settingsContent, #settingsPages, #settingsPage {
             background: #121315;
         }
+        #settingsSidebar {
+            background: #181a1d;
+            border-right: 1px solid #2c3035;
+        }
         #settingsBackButton {
-            min-width: 36px;
-            max-width: 36px;
-            min-height: 36px;
-            max-height: 36px;
-            padding: 0;
+            min-height: 38px;
+            padding: 0 9px;
+            text-align: left;
+            color: #aeb3b9;
             background: transparent;
             border-color: transparent;
         }
         #settingsBackButton:hover {
+            color: #ffffff;
             background: #292d32;
             border-color: transparent;
         }
-        #settingsTabs {
-            background: #202327;
-            border: 1px solid #30343a;
-            border-radius: 7px;
+        #settingsTitle {
+            min-height: 42px;
+            padding: 8px 9px 4px 9px;
+            color: #f5f6f7;
+            font-size: 22px;
+            font-weight: 600;
         }
-        #settingsTab {
-            min-width: 104px;
-            min-height: 32px;
-            max-height: 32px;
-            padding: 0 12px;
-            color: #9fa5ac;
+        #settingsNavButton {
+            min-height: 40px;
+            padding: 0 10px;
+            text-align: left;
+            color: #aeb3b9;
             background: transparent;
             border-color: transparent;
-            border-radius: 5px;
+            border-radius: 6px;
         }
-        #settingsTab:hover {
+        #settingsNavButton:hover {
             color: #f2f3f4;
-            background: #292d31;
+            background: #25282c;
             border-color: transparent;
         }
-        #settingsTab:checked {
+        #settingsNavButton:checked {
             color: #ffffff;
-            background: #3a3f45;
-            border-color: #484e55;
+            background: #34383d;
+            border-color: transparent;
         }
         #settingsVersion {
-            padding-top: 6px;
+            padding: 0 9px;
             color: #666c73;
             font-size: 11px;
         }
-        #settingsTitle {
-            color: #f5f6f7;
-            font-size: 25px;
-            font-weight: 600;
-        }
-        #settingsSubtitle, #settingsSectionHint, #settingsRowHint {
+        #settingsSectionHint, #settingsRowHint {
             color: #8e949b;
         }
         #settingsSectionTitle {
             margin-top: 4px;
             color: #f0f2f3;
-            font-size: 18px;
+            font-size: 24px;
             font-weight: 600;
         }
         #settingsSectionHint {
@@ -2673,16 +2670,16 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
         stylesheet += """
             QMainWindow, #appRoot, QStackedWidget, #emptyState,
             #reviewWorkspace, QScrollArea, #photo_grid_host,
-            #settingsView {
+            #settingsView, #settingsContent, #settingsPages, #settingsPage {
                 background: #08090a;
             }
             #header, QStatusBar {
                 background: #101113;
             }
-            #sidebar {
+            #sidebar, #settingsSidebar {
                 background: #111315;
             }
-            #photoCard, #settingsGroup, #settingsTabs {
+            #photoCard, #settingsGroup {
                 background: #181a1d;
             }
         """
