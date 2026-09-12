@@ -2,6 +2,15 @@
 
 一个本地运行的 Windows / macOS 照片初筛工具。它会读取照片的拍摄时间和视觉特征，把连拍、同机位的近似照片整理成组，再由用户逐组确认保留项。
 
+## 下载
+
+前往 [GitHub Releases](https://github.com/Tohsaka-Rin-Ovo/photo-fit-picker/releases) 下载：
+
+- Windows：`PhotoFitPicker-Windows-x64-Setup.exe`
+- macOS：`PhotoFitPicker-macOS.dmg`
+
+安装包暂未配置商业代码签名，Windows SmartScreen 或 macOS Gatekeeper 可能提示未知开发者。`SHA256SUMS.txt` 可用于核对下载文件是否完整。
+
 ## 当前功能
 
 - 拖入或选择整个照片文件夹，递归扫描常规图片、HEIC 和主流相机 RAW。
@@ -62,7 +71,7 @@ chmod +x scripts/build-macos.sh
 
 Windows：双击 `scripts\build-windows.bat`，或在命令提示符中运行它。
 
-GitHub Actions 配置位于 `.github/workflows/build.yml`。推送 `v*` 标签或手动运行工作流后，会分别生成 Windows 和 macOS 构建产物。PyInstaller 必须在目标操作系统上构建，因此不能只在 Mac 上直接生成可靠的 Windows 程序。
+GitHub Actions 配置位于 `.github/workflows/build.yml`。手动运行工作流会生成临时构建产物；推送 `v*` 标签会自动创建 GitHub Release，上传 Windows 安装程序、macOS DMG 和 SHA-256 校验文件。PyInstaller 必须在目标操作系统上构建，因此不能只在 Mac 上直接生成可靠的 Windows 程序。
 
 ## 第一版算法边界
 
