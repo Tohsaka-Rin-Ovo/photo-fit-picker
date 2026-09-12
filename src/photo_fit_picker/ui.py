@@ -83,6 +83,7 @@ from .fileops import (
 )
 from .models import AnalysisOptions, PhotoGroup, PhotoRecord, ReviewStatus
 from .organizer import OrganizationGroup, OrganizationPlan, build_organization_plan
+from .session import ReviewSessionStore, ReviewSessionSummary
 from .worker import AnalysisWorker
 
 
@@ -1224,10 +1225,10 @@ class SettingsView(QWidget):
             self.source_path_block,
             1,
         )
-        change_source = FeedbackButton("更换")
-        change_source.setObjectName("settingsActionButton")
-        change_source.clicked.connect(self.source_requested.emit)
-        source_row.addWidget(change_source)
+        self.change_source_button = FeedbackButton("更换")
+        self.change_source_button.setObjectName("settingsActionButton")
+        self.change_source_button.clicked.connect(self.source_requested.emit)
+        source_row.addWidget(self.change_source_button)
         source_layout.addLayout(source_row)
         layout.addWidget(source_group)
 
@@ -1517,6 +1518,7 @@ class SettingsView(QWidget):
 
     def set_analysis_available(self, has_source: bool, is_running: bool) -> None:
         self.reanalyze_button.setEnabled(has_source and not is_running)
+        self.change_source_button.setEnabled(not is_running)
 
     def refresh_preferences(self) -> None:
         theme = _theme_setting(self.preferences)
@@ -1692,6 +1694,14 @@ class MainWindow(QMainWindow):
         self.analysis_options = AnalysisOptions()
         self.destination_mode = "source"
         self._load_preferences()
+        state_location = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.AppDataLocation
+        )
+        state_root = Path(state_location or Path.home() / ".photo-fit-picker")
+        self.session_store = ReviewSessionStore(state_root / "review-sessions")
+        self.latest_session: Optional[ReviewSessionSummary] = (
+            self.session_store.latest()
+        )
         self.groups: list[PhotoGroup] = []
         self.visible_groups: list[PhotoGroup] = []
         self.cards: list[PhotoCard] = []
@@ -1701,6 +1711,10 @@ class MainWindow(QMainWindow):
         self.analysis_worker: Optional[AnalysisWorker] = None
 
         self._build_ui()
+        self.session_save_timer = QTimer(self)
+        self.session_save_timer.setSingleShot(True)
+        self.session_save_timer.setInterval(350)
+        self.session_save_timer.timeout.connect(self._save_session_now)
         self.grid_resize_timer = QTimer(self)
         self.grid_resize_timer.setSingleShot(True)
         self.grid_resize_timer.setInterval(45)
@@ -1762,6 +1776,15 @@ class MainWindow(QMainWindow):
         self.progress.setFixedWidth(220)
         self.progress.hide()
         status.addPermanentWidget(self.progress)
+        self.cancel_analysis_button = FeedbackToolButton()
+        self.cancel_analysis_button.setObjectName("analysisCancelButton")
+        self.cancel_analysis_button.setIcon(_icon("close"))
+        self.cancel_analysis_button.setIconSize(QSize(15, 15))
+        self.cancel_analysis_button.setToolTip("取消当前分析")
+        self.cancel_analysis_button.setAccessibleName("取消当前分析")
+        self.cancel_analysis_button.clicked.connect(self._cancel_analysis)
+        self.cancel_analysis_button.hide()
+        status.addPermanentWidget(self.cancel_analysis_button)
         self.setStatusBar(status)
 
     def _load_preferences(self) -> None:
@@ -1923,18 +1946,40 @@ class MainWindow(QMainWindow):
         empty_hint.setObjectName("emptyHint")
         empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(empty_hint)
-        choose = FeedbackButton("选择照片文件夹")
-        choose.setObjectName("emptyPrimaryButton")
-        choose.setIcon(_icon("folder-open-outline", "#173325"))
-        choose.setIconSize(QSize(19, 19))
-        choose.clicked.connect(self._choose_source)
-        empty_layout.addWidget(choose, alignment=Qt.AlignmentFlag.AlignCenter)
-        demo = FeedbackButton("试用演示照片")
-        demo.setObjectName("quietButton")
-        demo.setIcon(_icon("image-outline", ICON_MUTED))
-        demo.clicked.connect(self._load_demo_photos)
-        demo.setVisible(_bundled_demo_folder() is not None)
-        empty_layout.addWidget(demo, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.resume_button = FeedbackButton("继续上次筛选")
+        self.resume_button.setObjectName("emptyPrimaryButton")
+        self.resume_button.setIcon(_icon("history", "#173325"))
+        self.resume_button.setIconSize(QSize(19, 19))
+        self.resume_button.clicked.connect(self._resume_last_session)
+        empty_layout.addWidget(
+            self.resume_button,
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        self.resume_detail = QLabel()
+        self.resume_detail.setObjectName("resumeDetail")
+        self.resume_detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_layout.addWidget(
+            self.resume_detail,
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        self.empty_choose_button = FeedbackButton("选择其他照片文件夹")
+        self.empty_choose_button.setObjectName("emptySecondaryButton")
+        self.empty_choose_button.setIcon(_icon("folder-open-outline"))
+        self.empty_choose_button.setIconSize(QSize(19, 19))
+        self.empty_choose_button.clicked.connect(self._choose_source)
+        empty_layout.addWidget(
+            self.empty_choose_button,
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
+        self.demo_button = FeedbackButton("试用演示照片")
+        self.demo_button.setObjectName("quietButton")
+        self.demo_button.setIcon(_icon("image-outline", ICON_MUTED))
+        self.demo_button.clicked.connect(self._load_demo_photos)
+        self.demo_button.setVisible(_bundled_demo_folder() is not None)
+        empty_layout.addWidget(
+            self.demo_button,
+            alignment=Qt.AlignmentFlag.AlignCenter,
+        )
         self.content_stack.addWidget(empty)
 
         review = QWidget()
@@ -1991,6 +2036,11 @@ class MainWindow(QMainWindow):
         reject_all_action = group_menu.addAction("排除整组")
         reject_all_action.triggered.connect(
             lambda: self._set_current_group(ReviewStatus.REJECTED)
+        )
+        group_menu.addSeparator()
+        reset_group_action = group_menu.addAction("重置为待审核")
+        reset_group_action.triggered.connect(
+            lambda: self._set_current_group(ReviewStatus.PENDING)
         )
         self.group_more_button = FeedbackToolButton()
         self.group_more_button.setObjectName("toolbarIconButton")
@@ -2094,6 +2144,82 @@ class MainWindow(QMainWindow):
         self.move_button.setText("移动保留项")
         self.move_button.setEnabled(False)
         self.undo_button.setEnabled(False)
+        self._refresh_resume_ui()
+
+    def _refresh_resume_ui(self) -> None:
+        self.latest_session = self.session_store.latest()
+        has_session = self.latest_session is not None
+        self.resume_button.setVisible(has_session)
+        self.resume_detail.setVisible(has_session)
+        if self.latest_session:
+            summary = self.latest_session
+            self.resume_detail.setText(
+                f"{summary.source.name}  ·  "
+                f"已审核 {summary.reviewed_count} / {summary.total_count}"
+            )
+            self.resume_detail.setToolTip(str(summary.source))
+        self.empty_choose_button.setText(
+            "选择其他照片文件夹" if has_session else "选择照片文件夹"
+        )
+        self.empty_choose_button.setObjectName(
+            "emptySecondaryButton" if has_session else "emptyPrimaryButton"
+        )
+        self.empty_choose_button.setIcon(
+            _icon(
+                "folder-open-outline",
+                ICON_MUTED if has_session else "#173325",
+            )
+        )
+        self.empty_choose_button.style().unpolish(self.empty_choose_button)
+        self.empty_choose_button.style().polish(self.empty_choose_button)
+
+    def _resume_last_session(self) -> None:
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            return
+        summary = self.session_store.latest()
+        if not summary:
+            self._refresh_resume_ui()
+            return
+        self._set_source(summary.source)
+        self._start_analysis()
+
+    def _schedule_session_save(self) -> None:
+        if self.source_folder and self.groups:
+            self.session_save_timer.start()
+
+    def _save_session_now(self) -> None:
+        if not self.source_folder or not self.groups:
+            return
+        try:
+            self.latest_session = self.session_store.save(
+                self.source_folder,
+                self._all_photos(),
+            )
+        except OSError as exc:
+            self.statusBar().showMessage(f"无法保存筛选进度：{exc}", 8000)
+
+    def _set_analysis_busy(self, busy: bool) -> None:
+        self.folder_button.setEnabled(not busy)
+        self.settings_button.setEnabled(not busy)
+        self.content_stack.setEnabled(not busy)
+        self.sidebar_review_panel.setEnabled(not busy)
+        self.organize_button.setEnabled(not busy and bool(self.groups))
+        self.settings_view.set_analysis_available(
+            self.source_folder is not None,
+            busy,
+        )
+        self.progress.setVisible(busy)
+        self.cancel_analysis_button.setVisible(busy)
+        self.cancel_analysis_button.setEnabled(busy)
+        if not busy:
+            self._update_summary()
+
+    def _cancel_analysis(self) -> None:
+        if not self.analysis_worker:
+            return
+        self.analysis_worker.cancel()
+        self.cancel_analysis_button.setEnabled(False)
+        self.statusBar().showMessage("正在取消分析…")
 
     def _open_settings(self) -> None:
         if self.root_stack.currentWidget() is self.settings_view:
@@ -2111,7 +2237,10 @@ class MainWindow(QMainWindow):
         self.root_stack.setCurrentWidget(self.settings_view)
 
     def _open_organization(self) -> None:
-        if not self.groups:
+        if (
+            not self.groups
+            or (self.analysis_thread and self.analysis_thread.isRunning())
+        ):
             return
         gap_minutes = int(self.preferences.value("organize/gap_minutes", 180))
         gps_radius = float(self.preferences.value("organize/gps_radius_km", 2))
@@ -2167,6 +2296,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_group_labels()
         self._update_summary()
+        self._schedule_session_save()
 
     def _close_settings(self) -> None:
         self._load_preferences()
@@ -2184,6 +2314,8 @@ class MainWindow(QMainWindow):
         self._update_destination_ui()
 
     def _choose_source_from_settings(self) -> None:
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            return
         selected = QFileDialog.getExistingDirectory(self, "选择照片文件夹")
         if not selected:
             return
@@ -2200,6 +2332,8 @@ class MainWindow(QMainWindow):
     def _handle_escape(self) -> None:
         if self.root_stack.currentWidget() is self.settings_view:
             self._close_settings()
+        elif self.root_stack.currentWidget() is self.organization_view:
+            self._close_organization()
         else:
             self._clear_selection()
 
@@ -2216,12 +2350,16 @@ class MainWindow(QMainWindow):
             self.settings_button.setToolTip("设置")
 
     def _choose_source(self) -> None:
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            return
         selected = QFileDialog.getExistingDirectory(self, "选择照片文件夹")
         if selected:
             self._set_source(Path(selected))
             self._start_analysis()
 
     def _load_demo_photos(self) -> None:
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            return
         try:
             folder = _prepare_demo_folder()
         except OSError as exc:
@@ -2235,6 +2373,17 @@ class MainWindow(QMainWindow):
         self._start_analysis()
 
     def _set_source(self, folder: Path) -> None:
+        folder = folder.resolve()
+        source_changed = bool(
+            self.source_folder and self.source_folder.resolve() != folder
+        )
+        if source_changed:
+            self._save_session_now()
+            self.groups.clear()
+            self.visible_groups.clear()
+            self.group_list.clear()
+            self._clear_grid()
+            self._show_empty_state()
         self.source_folder = folder
         self.settings_view.set_source_folder(folder)
         self.source_label.setText(folder.name)
@@ -2272,7 +2421,14 @@ class MainWindow(QMainWindow):
     def _start_analysis(self) -> None:
         if not self.source_folder:
             return
-        paths = discover_images(self.source_folder)
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            self.statusBar().showMessage("已有照片分析正在进行", 4000)
+            return
+        try:
+            paths = discover_images(self.source_folder)
+        except OSError as exc:
+            QMessageBox.critical(self, "无法读取照片文件夹", str(exc))
+            return
         if self.destination_folder:
             destination = self.destination_folder.resolve()
             paths = [path for path in paths if destination not in path.resolve().parents]
@@ -2310,7 +2466,7 @@ class MainWindow(QMainWindow):
         thread.finished.connect(self._analysis_thread_finished)
         self.analysis_thread = thread
         self.analysis_worker = worker
-        self.settings_view.set_analysis_available(True, True)
+        self._set_analysis_busy(True)
         thread.start()
 
     def _analysis_progress(self, current: int, total: int, filename: str) -> None:
@@ -2323,14 +2479,22 @@ class MainWindow(QMainWindow):
         groups: list[PhotoGroup],
         failures: list[tuple[Path, str]],
     ) -> None:
+        restored = 0
+        if self.source_folder:
+            restored = self.session_store.restore(
+                self.source_folder,
+                [photo for group in groups for photo in group.photos],
+            )
         self.groups = groups
         self._apply_group_filter()
         photo_count = sum(len(group.photos) for group in groups)
         similar_count = sum(len(group.photos) > 1 for group in groups)
+        restored_text = f"，恢复 {restored} 项审核决定" if restored else ""
         self.statusBar().showMessage(
-            f"分析完成：{photo_count} 张照片，{similar_count} 个相似组",
+            f"分析完成：{photo_count} 张照片，{similar_count} 个相似组{restored_text}",
             8000,
         )
+        self._save_session_now()
         if failures:
             details = "\n".join(
                 f"{path.name}：{message.splitlines()[0]}"
@@ -2354,10 +2518,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("分析已取消", 5000)
 
     def _analysis_thread_finished(self) -> None:
-        self.progress.hide()
         self.analysis_thread = None
         self.analysis_worker = None
-        self.settings_view.set_analysis_available(self.source_folder is not None, False)
+        self._set_analysis_busy(False)
 
     def _apply_group_filter(self) -> None:
         settings_open = self.root_stack.currentWidget() is self.settings_view
@@ -2531,6 +2694,7 @@ class MainWindow(QMainWindow):
             card.sync_status()
         self._refresh_group_labels()
         self._update_summary()
+        self._schedule_session_save()
 
     def _open_viewer(self, photo: PhotoRecord) -> None:
         group = self._current_group()
@@ -2575,6 +2739,7 @@ class MainWindow(QMainWindow):
         if group and row >= 0:
             self.group_list.item(row).setText(self._group_label(group))
         self._update_summary()
+        self._schedule_session_save()
 
     def _refresh_group_labels(self) -> None:
         for row, group in enumerate(self.visible_groups):
@@ -2602,6 +2767,7 @@ class MainWindow(QMainWindow):
                 card.sync_status()
         self._refresh_group_labels()
         self._update_summary()
+        self._schedule_session_save()
 
     def _confirm_trash_selected(self) -> None:
         selected = self._selected_photos()
@@ -2633,6 +2799,7 @@ class MainWindow(QMainWindow):
         self._selection_changed()
         self._refresh_group_labels()
         self._update_summary()
+        self._schedule_session_save()
         if errors:
             QMessageBox.warning(
                 self,
@@ -2654,6 +2821,16 @@ class MainWindow(QMainWindow):
             return
         destination_path = Path(destination)
         linked_records = expand_linked_photo_records(self._all_photos(), selected)
+        if any(
+            photo.path.resolve().parent == destination_path.resolve()
+            for photo in linked_records
+        ):
+            QMessageBox.warning(
+                self,
+                "请选择其他文件夹",
+                "目标文件夹不能与所选照片当前所在的文件夹相同。",
+            )
+            return
         linked_count = max(0, len(linked_records) - len(selected))
         linked_text = f"（含 {linked_count} 张关联 RAW/JPEG）" if linked_count else ""
         answer = QMessageBox.question(
@@ -2683,6 +2860,7 @@ class MainWindow(QMainWindow):
         self._selection_changed()
         self._refresh_group_labels()
         self._update_summary()
+        self._schedule_session_save()
 
     def _update_summary(self) -> None:
         photos = [photo for group in self.groups for photo in group.photos]
@@ -2719,6 +2897,17 @@ class MainWindow(QMainWindow):
             self._choose_destination()
             if not self.destination_folder:
                 return
+        linked_records = expand_linked_photo_records(photos, kept)
+        if any(
+            photo.path.resolve().parent == self.destination_folder.resolve()
+            for photo in linked_records
+        ):
+            QMessageBox.warning(
+                self,
+                "请选择其他文件夹",
+                "目标文件夹不能与保留照片当前所在的文件夹相同。",
+            )
+            return
         answer = QMessageBox.question(
             self,
             "确认移动照片",
@@ -2741,6 +2930,7 @@ class MainWindow(QMainWindow):
         self._refresh_group_labels()
         self._update_summary()
         self._show_group_at_row(self.group_list.currentRow())
+        self._schedule_session_save()
 
     def _undo_move(self) -> None:
         if not self.destination_folder:
@@ -2764,6 +2954,7 @@ class MainWindow(QMainWindow):
             self._refresh_group_labels()
             self._show_group_at_row(self.group_list.currentRow())
             self._update_summary()
+            self._schedule_session_save()
         elif not errors:
             QMessageBox.information(
                 self,
@@ -2774,11 +2965,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "部分文件未恢复", "\n".join(errors[:8]))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            event.ignore()
+            return
         urls = event.mimeData().urls()
         if any(url.isLocalFile() for url in urls):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            event.ignore()
+            return
         local_paths = [
             Path(url.toLocalFile())
             for url in event.mimeData().urls()
@@ -2799,6 +2996,8 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self.session_save_timer.stop()
+        self._save_session_now()
         if self.analysis_thread and self.analysis_thread.isRunning() and self.analysis_worker:
             self.analysis_worker.cancel()
             self.analysis_thread.quit()
@@ -2892,6 +3091,11 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             color: #858b93;
             font-size: 13px;
         }
+        #resumeDetail {
+            margin-bottom: 2px;
+            color: #858b93;
+            font-size: 12px;
+        }
         #groupTitle {
             color: #f2f3f4;
             font-size: 18px;
@@ -2971,9 +3175,11 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             background: #25282c;
             border-color: transparent;
         }
-        #emptyPrimaryButton {
-            min-width: 168px;
+        #emptyPrimaryButton, #emptySecondaryButton {
+            min-width: 188px;
             min-height: 42px;
+        }
+        #emptyPrimaryButton {
             color: #173325;
             background: #b8f2d0;
             border-color: #b8f2d0;
@@ -2982,6 +3188,25 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
         #emptyPrimaryButton:hover {
             background: #c9f7dc;
             border-color: #c9f7dc;
+        }
+        #emptySecondaryButton {
+            color: #c5cbd0;
+            background: transparent;
+            border-color: #3b4046;
+        }
+        #emptySecondaryButton:hover {
+            color: #ffffff;
+            background: #25292d;
+            border-color: #565d65;
+        }
+        #analysisCancelButton {
+            min-width: 24px;
+            max-width: 24px;
+            min-height: 22px;
+            max-height: 22px;
+            padding: 0;
+            background: transparent;
+            border-color: transparent;
         }
         #disclosureButton {
             min-width: 0;
@@ -3565,6 +3790,16 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
                 color: #8ea69a;
                 background: #dce7e1;
                 border-color: #dce7e1;
+            }
+            #emptySecondaryButton {
+                color: #4f5962;
+                background: #ffffff;
+                border-color: #d4d9de;
+            }
+            #emptySecondaryButton:hover {
+                color: #171b1f;
+                background: #f1f3f5;
+                border-color: #bcc3ca;
             }
             #headerIconButton, #toolbarIconButton, #batchIconButton,
             #quietButton, #disclosureButton, #sidebarButton,
