@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+import shutil
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 from photo_fit_picker.fileops import (
+    execute_organization_plan,
     move_photo_to_trash,
     move_photos,
     move_selected,
@@ -12,6 +14,7 @@ from photo_fit_picker.fileops import (
     undo_last_move,
 )
 from photo_fit_picker.models import PhotoRecord, ReviewStatus
+from photo_fit_picker.organizer import OrganizationGroup, OrganizationPlan
 
 
 def make_photo(path: Path, status: ReviewStatus) -> PhotoRecord:
@@ -143,6 +146,100 @@ class FileOperationTests(unittest.TestCase):
 
             self.assertEqual((destination / "same.jpg").read_bytes(), b"first")
             self.assertEqual((destination / "same_2.jpg").read_bytes(), b"second")
+
+    def test_raw_jpeg_and_xmp_are_moved_and_undone_together(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            destination = root / "picked"
+            source.mkdir()
+            raw_path = source / "DSC_0042.NEF"
+            jpeg_path = source / "DSC_0042.jpg"
+            xmp_path = source / "DSC_0042.xmp"
+            raw_path.write_bytes(b"raw")
+            jpeg_path.write_bytes(b"jpeg")
+            xmp_path.write_bytes(b"rating=5")
+            raw = make_photo(raw_path, ReviewStatus.KEPT)
+            jpeg = make_photo(jpeg_path, ReviewStatus.REJECTED)
+
+            moved = move_selected([raw, jpeg], destination)
+
+            self.assertEqual(len(moved), 3)
+            self.assertTrue((destination / "DSC_0042.NEF").exists())
+            self.assertTrue((destination / "DSC_0042.jpg").exists())
+            self.assertTrue((destination / "DSC_0042.xmp").exists())
+            self.assertEqual(raw.status, ReviewStatus.MOVED)
+            self.assertEqual(jpeg.status, ReviewStatus.MOVED)
+
+            restored, errors = undo_last_move(destination)
+            self.assertEqual(len(restored), 3)
+            self.assertEqual(errors, [])
+            self.assertTrue(raw_path.exists())
+            self.assertTrue(jpeg_path.exists())
+            self.assertTrue(xmp_path.exists())
+            statuses = {
+                Path(entry.source).suffix.lower(): entry.previous_status
+                for entry in restored
+            }
+            self.assertEqual(statuses[".nef"], ReviewStatus.KEPT.value)
+            self.assertEqual(statuses[".jpg"], ReviewStatus.REJECTED.value)
+
+    def test_failed_batch_move_rolls_back_without_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            destination = root / "picked"
+            source.mkdir()
+            first_path = source / "first.jpg"
+            second_path = source / "second.jpg"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            first = make_photo(first_path, ReviewStatus.KEPT)
+            second = make_photo(second_path, ReviewStatus.KEPT)
+            real_move = shutil.move
+
+            def fail_second(source_name: str, destination_name: str):  # type: ignore[no-untyped-def]
+                if Path(source_name).name == "second.jpg":
+                    raise OSError("simulated disk error")
+                return real_move(source_name, destination_name)
+
+            with patch("photo_fit_picker.fileops.shutil.move", side_effect=fail_second):
+                with self.assertRaisesRegex(OSError, "已回滚"):
+                    move_selected([first, second], destination)
+
+            self.assertTrue(first_path.exists())
+            self.assertTrue(second_path.exists())
+            self.assertEqual(first.status, ReviewStatus.KEPT)
+            self.assertEqual(second.status, ReviewStatus.KEPT)
+            self.assertEqual(read_history(destination), [])
+
+    def test_organization_uses_distinct_folders_and_keeps_history_at_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            destination = root / "organized"
+            source.mkdir()
+            first_path = source / "first.jpg"
+            second_path = source / "second.jpg"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            first = make_photo(first_path, ReviewStatus.PENDING)
+            second = make_photo(second_path, ReviewStatus.REJECTED)
+            plan = OrganizationPlan(
+                [
+                    OrganizationGroup(1, "旅行", [first], "test"),
+                    OrganizationGroup(2, "旅行", [second], "test"),
+                ]
+            )
+
+            moved = execute_organization_plan(plan, destination)
+
+            self.assertEqual(len(moved), 2)
+            self.assertTrue((destination / "旅行" / "first.jpg").exists())
+            self.assertTrue((destination / "旅行 (2)" / "second.jpg").exists())
+            self.assertEqual(len(read_history(destination)), 2)
+            self.assertEqual(first.status, ReviewStatus.MOVED)
+            self.assertEqual(second.status, ReviewStatus.MOVED)
 
 
 if __name__ == "__main__":

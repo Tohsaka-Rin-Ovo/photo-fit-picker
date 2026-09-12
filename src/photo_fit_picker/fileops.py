@@ -6,9 +6,13 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable, Optional
 
+from .analysis import SUPPORTED_EXTENSIONS
 from .models import PhotoRecord, ReviewStatus
+
+if TYPE_CHECKING:
+    from .organizer import OrganizationPlan
 
 
 HISTORY_FILE = ".photo-fit-picker-history.json"
@@ -19,6 +23,10 @@ class MoveEntry:
     source: str
     destination: str
     moved_at: str
+    previous_status: str = ""
+
+
+LINKED_EXTENSIONS = SUPPORTED_EXTENSIONS | {".xmp"}
 
 
 def _available_destination(folder: Path, filename: str) -> Path:
@@ -88,50 +96,221 @@ def read_history(destination: Path) -> list[MoveEntry]:
 
 def _write_history(destination: Path, entries: list[MoveEntry]) -> None:
     payload = [asdict(entry) for entry in entries]
-    _history_path(destination).write_text(
+    path = _history_path(destination)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    temporary.replace(path)
 
 
-def _move_photos(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
-    destination.mkdir(parents=True, exist_ok=True)
-    history = read_history(destination)
-    moved: list[MoveEntry] = []
-    batch_time = datetime.now().isoformat(timespec="microseconds")
+def linked_asset_paths(path: Path) -> list[Path]:
+    source = path.resolve()
+    if not source.is_file():
+        return []
+    stem = source.stem.casefold()
     try:
-        for photo in photos:
-            if photo.status in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+        siblings = source.parent.iterdir()
+    except OSError:
+        return [source]
+    return sorted(
+        (
+            sibling.resolve()
+            for sibling in siblings
+            if sibling.is_file()
+            and sibling.stem.casefold() == stem
+            and sibling.suffix.lower() in LINKED_EXTENSIONS
+        ),
+        key=lambda candidate: (candidate != source, candidate.suffix.lower()),
+    )
+
+
+def expand_linked_photo_records(
+    records: Iterable[PhotoRecord],
+    selected: Iterable[PhotoRecord],
+) -> list[PhotoRecord]:
+    all_records = list(records)
+    keys = {
+        (photo.path.resolve().parent, photo.path.stem.casefold())
+        for photo in selected
+    }
+    return [
+        photo
+        for photo in all_records
+        if (photo.path.resolve().parent, photo.path.stem.casefold()) in keys
+        and photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
+    ]
+
+
+def _reserved_destination(
+    folder: Path,
+    filename: str,
+    reserved: set[Path],
+) -> Path:
+    candidate = folder / filename
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    counter = 2
+    while candidate.exists() or candidate.resolve() in reserved:
+        candidate = folder / f"{stem}_{counter}{suffix}"
+        counter += 1
+    reserved.add(candidate.resolve())
+    return candidate
+
+
+def _plan_photo_moves(
+    photos: Iterable[PhotoRecord],
+    destination: Path,
+    batch_time: str,
+    reserved: Optional[set[Path]] = None,
+    seen: Optional[set[Path]] = None,
+) -> list[MoveEntry]:
+    records = list(photos)
+    status_by_source = {
+        photo.path.resolve(): photo.status.value
+        for photo in records
+    }
+    planned: list[MoveEntry] = []
+    source_paths = seen if seen is not None else set()
+    destinations = reserved if reserved is not None else set()
+    for photo in records:
+        for source in linked_asset_paths(photo.path):
+            if source in source_paths:
                 continue
-            if not photo.path.is_file():
-                continue
-            target = _available_destination(destination, photo.path.name)
-            source = photo.path.resolve()
-            shutil.move(str(source), str(target))
-            entry = MoveEntry(
-                source=str(source),
-                destination=str(target.resolve()),
-                moved_at=batch_time,
+            source_paths.add(source)
+            target = _reserved_destination(destination, source.name, destinations)
+            planned.append(
+                MoveEntry(
+                    source=str(source),
+                    destination=str(target.resolve()),
+                    moved_at=batch_time,
+                    previous_status=status_by_source.get(source, ""),
+                )
             )
-            moved.append(entry)
-            history.append(entry)
+    return planned
+
+
+def _execute_move_entries(entries: list[MoveEntry], history_root: Path) -> list[MoveEntry]:
+    if not entries:
+        return []
+    history_root.mkdir(parents=True, exist_ok=True)
+    history = read_history(history_root)
+    completed: list[MoveEntry] = []
+    try:
+        for entry in entries:
+            source = Path(entry.source)
+            destination = Path(entry.destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
+            completed.append(entry)
+        _write_history(history_root, history + completed)
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        unrestored: list[MoveEntry] = []
+        for entry in reversed(completed):
+            source = Path(entry.source)
+            destination = Path(entry.destination)
+            try:
+                if destination.exists() and not source.exists():
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(destination), str(source))
+                elif destination.exists():
+                    unrestored.append(entry)
+            except OSError as rollback_error:
+                unrestored.append(entry)
+                rollback_errors.append(f"{destination.name}: {rollback_error}")
+        history_error = ""
+        if unrestored:
+            try:
+                _write_history(history_root, history + list(reversed(unrestored)))
+            except OSError as write_error:
+                history_error = f"；移动历史也无法写入：{write_error}"
+        if unrestored:
+            detail = f"移动失败，且有 {len(unrestored)} 个文件未能回滚：{exc}"
+        else:
+            detail = f"移动失败，已回滚本批操作：{exc}"
+        if rollback_errors:
+            detail += "\n回滚错误：" + "；".join(rollback_errors)
+        detail += history_error
+        raise OSError(detail) from exc
+    return completed
+
+
+def _update_moved_records(
+    records: Iterable[PhotoRecord],
+    entries: Iterable[MoveEntry],
+) -> None:
+    destinations = {
+        Path(entry.source).resolve(): Path(entry.destination).resolve()
+        for entry in entries
+    }
+    for photo in records:
+        target = destinations.get(photo.path.resolve())
+        if target:
             photo.path = target
             photo.status = ReviewStatus.MOVED
             photo.selected = False
-    finally:
-        if moved:
-            _write_history(destination, history)
+
+
+def _move_photos(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
+    records = [
+        photo
+        for photo in photos
+        if photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
+    ]
+    batch_time = datetime.now().isoformat(timespec="microseconds")
+    planned = _plan_photo_moves(records, destination, batch_time)
+    moved = _execute_move_entries(planned, destination)
+    _update_moved_records(records, moved)
     return moved
 
 
 def move_selected(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
-    kept = (photo for photo in photos if photo.status == ReviewStatus.KEPT)
-    return _move_photos(kept, destination)
+    records = list(photos)
+    kept = [photo for photo in records if photo.status == ReviewStatus.KEPT]
+    return _move_photos(expand_linked_photo_records(records, kept), destination)
 
 
 def move_photos(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
     """Move only the photo records explicitly supplied by the caller."""
     return _move_photos(photos, destination)
+
+
+def plan_organization_moves(
+    plan: "OrganizationPlan",
+    destination_root: Path,
+) -> list[MoveEntry]:
+    batch_time = datetime.now().isoformat(timespec="microseconds")
+    reserved: set[Path] = set()
+    planned: list[MoveEntry] = []
+    used_names: dict[str, int] = {}
+    seen: set[Path] = set()
+    for group in plan.groups:
+        count = used_names.get(group.name.casefold(), 0) + 1
+        used_names[group.name.casefold()] = count
+        folder_name = group.name if count == 1 else f"{group.name} ({count})"
+        planned.extend(
+            _plan_photo_moves(
+                group.photos,
+                destination_root / folder_name,
+                batch_time,
+                reserved,
+                seen,
+            )
+        )
+    return planned
+
+
+def execute_organization_plan(
+    plan: "OrganizationPlan",
+    destination_root: Path,
+) -> list[MoveEntry]:
+    records = [photo for group in plan.groups for photo in group.photos]
+    planned = plan_organization_moves(plan, destination_root)
+    moved = _execute_move_entries(planned, destination_root)
+    _update_moved_records(records, moved)
+    return moved
 
 
 def move_photo_to_trash(photo: PhotoRecord) -> Path:

@@ -71,7 +71,15 @@ from PIL import Image
 
 from . import __version__
 from .analysis import SUPPORTED_EXTENSIONS, discover_images, load_display_image
-from .fileops import move_photo_to_trash, move_photos, move_selected, undo_last_move
+from .fileops import (
+    execute_organization_plan,
+    expand_linked_photo_records,
+    move_photo_to_trash,
+    move_photos,
+    move_selected,
+    plan_organization_moves,
+    undo_last_move,
+)
 from .models import AnalysisOptions, PhotoGroup, PhotoRecord, ReviewStatus
 from .organizer import OrganizationGroup, OrganizationPlan, build_organization_plan
 from .worker import AnalysisWorker
@@ -824,6 +832,7 @@ class PhotoViewer(QDialog):
 
 class OrganizationView(QWidget):
     back_requested = Signal()
+    apply_requested = Signal(object)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -853,9 +862,14 @@ class OrganizationView(QWidget):
         title_box.addWidget(self.summary)
         header_layout.addLayout(title_box)
         header_layout.addStretch()
-        safety = QLabel("仅预览 · 不会移动照片")
+        safety = QLabel("确认前不会移动照片")
         safety.setObjectName("organizationSafety")
         header_layout.addWidget(safety)
+        self.apply_button = FeedbackButton("确认并整理")
+        self.apply_button.setObjectName("primaryButton")
+        self.apply_button.setIcon(_icon("folder-move-outline", "#173325"))
+        self.apply_button.clicked.connect(lambda: self.apply_requested.emit(self.plan))
+        header_layout.addWidget(self.apply_button)
         root.addWidget(header)
 
         content = QSplitter(Qt.Orientation.Horizontal)
@@ -1009,6 +1023,7 @@ class OrganizationView(QWidget):
         group = self._current_group()
         selected = len(self.photo_list.selectedItems())
         self.split_button.setEnabled(bool(group) and 0 < selected < len(group.photos))
+        self.apply_button.setEnabled(bool(self.plan.groups))
 
 
 class SettingsView(QWidget):
@@ -1751,6 +1766,7 @@ class MainWindow(QMainWindow):
         self.root_stack.addWidget(self.settings_view)
         self.organization_view = OrganizationView(self)
         self.organization_view.back_requested.connect(self._close_organization)
+        self.organization_view.apply_requested.connect(self._confirm_organization)
         self.root_stack.addWidget(self.organization_view)
         self.setCentralWidget(self.root_stack)
         status = QStatusBar()
@@ -2097,6 +2113,45 @@ class MainWindow(QMainWindow):
         self.root_stack.setCurrentWidget(self.workspace)
         self.statusBar().show()
         self._apply_group_filter()
+
+    def _confirm_organization(self, plan: OrganizationPlan) -> None:
+        if not plan.groups:
+            return
+        if not self.destination_folder:
+            self._choose_destination()
+            if not self.destination_folder:
+                return
+        planned = plan_organization_moves(plan, self.destination_folder)
+        if not planned:
+            QMessageBox.information(self, "没有可移动文件", "整理计划中的照片已不存在。")
+            return
+        photo_count = sum(len(group.photos) for group in plan.groups)
+        linked_count = max(0, len(planned) - photo_count)
+        linked_text = f"，另含 {linked_count} 个关联文件" if linked_count else ""
+        answer = QMessageBox.question(
+            self,
+            "确认执行整理",
+            f"将 {photo_count} 张照片{linked_text}整理到：\n"
+            f"{self.destination_folder}\n\n"
+            f"将创建 {len(plan.groups)} 个建议文件夹。不会删除或覆盖任何文件，"
+            "完成后可使用撤销按钮恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            moved = execute_organization_plan(plan, self.destination_folder)
+        except OSError as exc:
+            QMessageBox.critical(self, "整理未完成", str(exc))
+            return
+        self._close_organization()
+        self.statusBar().showMessage(
+            f"已整理 {photo_count} 张照片，共移动 {len(moved)} 个文件",
+            10000,
+        )
+        self._refresh_group_labels()
+        self._update_summary()
 
     def _close_settings(self) -> None:
         self._load_preferences()
@@ -2584,10 +2639,14 @@ class MainWindow(QMainWindow):
         if not destination:
             return
         destination_path = Path(destination)
+        linked_records = expand_linked_photo_records(self._all_photos(), selected)
+        linked_count = max(0, len(linked_records) - len(selected))
+        linked_text = f"（含 {linked_count} 张关联 RAW/JPEG）" if linked_count else ""
         answer = QMessageBox.question(
             self,
             "确认批量移动",
-            f"将选中的 {len(selected)} 张照片移动到：\n{destination_path}\n\n"
+            f"将选中的 {len(selected)} 张照片{linked_text}移动到：\n{destination_path}\n\n"
+            "同名 XMP sidecar 会一同移动；"
             "移动后可通过顶部撤销按钮恢复。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
@@ -2595,7 +2654,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            moved = move_photos(selected, destination_path)
+            moved = move_photos(linked_records, destination_path)
         except OSError as exc:
             QMessageBox.critical(self, "批量移动未完成", str(exc))
             for card in self.cards:
@@ -2650,7 +2709,7 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            moved = move_selected(kept, self.destination_folder)
+            moved = move_selected(photos, self.destination_folder)
         except OSError as exc:
             QMessageBox.critical(
                 self,
@@ -2669,12 +2728,19 @@ class MainWindow(QMainWindow):
             return
         restored, errors = undo_last_move(self.destination_folder)
         if restored:
-            by_destination = {Path(entry.destination): Path(entry.source) for entry in restored}
+            by_destination = {
+                Path(entry.destination): (Path(entry.source), entry.previous_status)
+                for entry in restored
+            }
             for group in self.groups:
                 for photo in group.photos:
                     if photo.path in by_destination:
-                        photo.path = by_destination[photo.path]
-                        photo.status = ReviewStatus.KEPT
+                        source, previous_status = by_destination[photo.path]
+                        photo.path = source
+                        try:
+                            photo.status = ReviewStatus(previous_status)
+                        except ValueError:
+                            photo.status = ReviewStatus.KEPT
             self.statusBar().showMessage(f"已恢复 {len(restored)} 张照片到原位置", 8000)
             self._refresh_group_labels()
             self._show_group_at_row(self.group_list.currentRow())
