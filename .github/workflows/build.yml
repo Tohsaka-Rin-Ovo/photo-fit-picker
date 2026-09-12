@@ -73,6 +73,14 @@ jobs:
           if (-not (Test-Path $compiler)) {
             throw "Inno Setup compiler was not found after installation"
           }
+          New-Item -ItemType Directory -Force -Path installer-languages | Out-Null
+          $languageUrl = "https://raw.githubusercontent.com/jrsoftware/issrc/1ae7bf81dc0d2013235dfe4bb0b6f4e4a0b6b25c/Files/Languages/ChineseSimplified.isl"
+          $languagePath = "installer-languages\ChineseSimplified.isl"
+          Invoke-WebRequest -Uri $languageUrl -OutFile $languagePath
+          $languageHash = (Get-FileHash -Algorithm SHA256 $languagePath).Hash.ToLowerInvariant()
+          if ($languageHash -ne "e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d") {
+            throw "ChineseSimplified.isl checksum did not match the pinned source"
+          }
       - name: Create Windows installer
         shell: pwsh
         env:
