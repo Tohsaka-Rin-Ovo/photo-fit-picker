@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QShortcut,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -71,6 +73,7 @@ from . import __version__
 from .analysis import SUPPORTED_EXTENSIONS, discover_images, load_display_image
 from .fileops import move_photo_to_trash, move_photos, move_selected, undo_last_move
 from .models import AnalysisOptions, PhotoGroup, PhotoRecord, ReviewStatus
+from .organizer import OrganizationGroup, OrganizationPlan, build_organization_plan
 from .worker import AnalysisWorker
 
 
@@ -819,6 +822,195 @@ class PhotoViewer(QDialog):
             self.resize_timer.start()
 
 
+class OrganizationView(QWidget):
+    back_requested = Signal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.plan = OrganizationPlan()
+        self.setObjectName("organizationView")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QFrame()
+        header.setObjectName("organizationHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(18, 12, 18, 12)
+        back = FeedbackToolButton()
+        back.setObjectName("headerIconButton")
+        back.setIcon(_icon("arrow-left"))
+        back.setToolTip("返回照片")
+        back.clicked.connect(self.back_requested.emit)
+        header_layout.addWidget(back)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(1)
+        title = QLabel("整理预览")
+        title.setObjectName("organizationTitle")
+        self.summary = QLabel("尚未生成整理建议")
+        self.summary.setObjectName("organizationSummary")
+        title_box.addWidget(title)
+        title_box.addWidget(self.summary)
+        header_layout.addLayout(title_box)
+        header_layout.addStretch()
+        safety = QLabel("仅预览 · 不会移动照片")
+        safety.setObjectName("organizationSafety")
+        header_layout.addWidget(safety)
+        root.addWidget(header)
+
+        content = QSplitter(Qt.Orientation.Horizontal)
+        content.setObjectName("organizationSplitter")
+        content.setChildrenCollapsible(False)
+        sidebar = QFrame()
+        sidebar.setObjectName("organizationSidebar")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 16, 14, 14)
+        sidebar_layout.setSpacing(10)
+        section = QLabel("建议分组")
+        section.setObjectName("sectionTitle")
+        sidebar_layout.addWidget(section)
+        self.group_list = QListWidget()
+        self.group_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.group_list.currentItemChanged.connect(self._show_current_group)
+        self.group_list.itemSelectionChanged.connect(self._update_actions)
+        sidebar_layout.addWidget(self.group_list, 1)
+        self.merge_button = FeedbackButton("合并所选分组")
+        self.merge_button.setIcon(_icon("set-merge", ICON_MUTED))
+        self.merge_button.clicked.connect(self._merge_selected)
+        sidebar_layout.addWidget(self.merge_button)
+        content.addWidget(sidebar)
+
+        detail = QWidget()
+        detail.setObjectName("organizationDetail")
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(28, 24, 28, 20)
+        detail_layout.setSpacing(12)
+        detail_title = QLabel("分组名称")
+        detail_title.setObjectName("sectionTitle")
+        detail_layout.addWidget(detail_title)
+        self.name_edit = QLineEdit()
+        self.name_edit.setObjectName("organizationNameEdit")
+        self.name_edit.setPlaceholderText("输入目标文件夹名称")
+        self.name_edit.editingFinished.connect(self._rename_current)
+        detail_layout.addWidget(self.name_edit)
+        self.group_meta = QLabel()
+        self.group_meta.setObjectName("organizationGroupMeta")
+        self.group_meta.setWordWrap(True)
+        detail_layout.addWidget(self.group_meta)
+        photos_title_row = QHBoxLayout()
+        photos_title = QLabel("组内照片")
+        photos_title.setObjectName("sectionTitle")
+        photos_title_row.addWidget(photos_title)
+        photos_title_row.addStretch()
+        self.split_button = FeedbackButton("拆分所选照片")
+        self.split_button.setIcon(_icon("call-split", ICON_MUTED))
+        self.split_button.clicked.connect(self._split_selected)
+        photos_title_row.addWidget(self.split_button)
+        detail_layout.addLayout(photos_title_row)
+        self.photo_list = QListWidget()
+        self.photo_list.setObjectName("organizationPhotoList")
+        self.photo_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.photo_list.itemSelectionChanged.connect(self._update_actions)
+        detail_layout.addWidget(self.photo_list, 1)
+        content.addWidget(detail)
+        content.setSizes([300, 980])
+        root.addWidget(content, 1)
+
+    def set_plan(self, plan: OrganizationPlan) -> None:
+        self.plan = plan
+        self._refresh_groups()
+
+    def _refresh_groups(self, selected_id: int = 1) -> None:
+        self.group_list.blockSignals(True)
+        self.group_list.clear()
+        selected_row = 0
+        for row, group in enumerate(self.plan.groups):
+            item = QListWidgetItem(f"{group.name}\n{len(group.photos)} 张 · {group.date_range}")
+            item.setData(Qt.ItemDataRole.UserRole, group.id)
+            item.setSizeHint(QSize(0, 58))
+            self.group_list.addItem(item)
+            if group.id == selected_id:
+                selected_row = row
+        self.group_list.blockSignals(False)
+        count = sum(len(group.photos) for group in self.plan.groups)
+        self.summary.setText(f"{count} 张照片 · {len(self.plan.groups)} 个建议文件夹")
+        if self.plan.groups:
+            self.group_list.setCurrentRow(selected_row)
+            self._show_current_group(self.group_list.currentItem())
+        else:
+            self.name_edit.clear()
+            self.group_meta.setText("没有可整理的照片")
+            self.photo_list.clear()
+        self._update_actions()
+
+    def _current_group(self) -> Optional[OrganizationGroup]:
+        item = self.group_list.currentItem()
+        if not item:
+            return None
+        return self.plan.group(int(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _show_current_group(self, _current: Optional[QListWidgetItem], *_args) -> None:
+        group = self._current_group()
+        self.photo_list.clear()
+        if not group:
+            return
+        self.name_edit.setText(group.name)
+        self.group_meta.setText(f"{group.date_range}\n{group.reason}")
+        for photo in group.photos:
+            item = QListWidgetItem(
+                f"{photo.display_name}\n{photo.captured_at:%H:%M:%S}  ·  "
+                f"{photo.format_label}  ·  {photo.file_size_label}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, str(photo.path))
+            preview = _read_preview(photo.path, QSize(88, 56))
+            if not preview.isNull():
+                item.setIcon(QIcon(QPixmap.fromImage(preview)))
+            item.setSizeHint(QSize(0, 64))
+            self.photo_list.addItem(item)
+        self._update_actions()
+
+    def _rename_current(self) -> None:
+        group = self._current_group()
+        if not group:
+            return
+        self.plan.rename(group.id, self.name_edit.text())
+        self.name_edit.setText(group.name)
+        current = self.group_list.currentItem()
+        if current:
+            current.setText(f"{group.name}\n{len(group.photos)} 张 · {group.date_range}")
+
+    def _merge_selected(self) -> None:
+        ids = [
+            int(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.group_list.selectedItems()
+        ]
+        merged = self.plan.merge(ids)
+        if merged:
+            self._refresh_groups(merged.id)
+
+    def _split_selected(self) -> None:
+        group = self._current_group()
+        if not group:
+            return
+        paths = [
+            Path(str(item.data(Qt.ItemDataRole.UserRole)))
+            for item in self.photo_list.selectedItems()
+        ]
+        created = self.plan.split(group.id, paths)
+        if created:
+            self._refresh_groups(created.id)
+
+    def _update_actions(self) -> None:
+        self.merge_button.setEnabled(len(self.group_list.selectedItems()) >= 2)
+        group = self._current_group()
+        selected = len(self.photo_list.selectedItems())
+        self.split_button.setEnabled(bool(group) and 0 < selected < len(group.photos))
+
+
 class SettingsView(QWidget):
     back_requested = Signal()
     source_requested = Signal()
@@ -865,6 +1057,7 @@ class SettingsView(QWidget):
                 ("外观", "palette-outline"),
                 ("文件夹", "folder-outline"),
                 ("筛选", "tune-variant"),
+                ("整理", "folder-marker-outline"),
                 ("算法", "chart-bell-curve-cumulative"),
                 ("实验功能", "flask-outline"),
             )
@@ -896,6 +1089,7 @@ class SettingsView(QWidget):
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_folder_page())
         self.pages.addWidget(self._build_review_page())
+        self.pages.addWidget(self._build_organization_page())
         self.pages.addWidget(self._build_algorithm_page())
         self.pages.addWidget(self._build_experiments_page())
         self.pages.setMaximumWidth(760)
@@ -1179,6 +1373,65 @@ class SettingsView(QWidget):
         layout.addStretch()
         return page
 
+    def _build_organization_page(self) -> QWidget:
+        page, layout = self._page(
+            "整理",
+            "控制本地整理建议如何划分一次旅行或拍摄活动。",
+        )
+        group, group_layout = self._group()
+        gap_row = QHBoxLayout()
+        gap_row.addWidget(
+            self._text_block("活动间隔", "超过这个时间没有拍摄，就建议创建新的活动文件夹。"),
+            1,
+        )
+        self.organization_gap = QSpinBox()
+        self.organization_gap.setRange(30, 720)
+        self.organization_gap.setSingleStep(30)
+        self.organization_gap.setSuffix(" 分钟")
+        self.organization_gap.setValue(
+            int(self.preferences.value("organize/gap_minutes", 180))
+        )
+        self.organization_gap.valueChanged.connect(
+            lambda value: self.preferences.setValue("organize/gap_minutes", value)
+        )
+        gap_row.addWidget(self.organization_gap)
+        group_layout.addLayout(gap_row)
+        group_layout.addWidget(self._divider())
+        radius_row = QHBoxLayout()
+        radius_row.addWidget(
+            self._text_block("GPS 地点半径", "相距超过该范围的照片会建议放入不同地点。"),
+            1,
+        )
+        self.organization_radius = QSpinBox()
+        self.organization_radius.setRange(1, 50)
+        self.organization_radius.setSuffix(" km")
+        self.organization_radius.setValue(
+            int(self.preferences.value("organize/gps_radius_km", 2))
+        )
+        self.organization_radius.valueChanged.connect(
+            lambda value: self.preferences.setValue("organize/gps_radius_km", value)
+        )
+        radius_row.addWidget(self.organization_radius)
+        group_layout.addLayout(radius_row)
+        layout.addWidget(group)
+
+        privacy_group, privacy_layout = self._group()
+        privacy_row = QHBoxLayout()
+        privacy_icon = QLabel()
+        privacy_icon.setPixmap(_icon("map-marker-check-outline", ICON_ACCENT).pixmap(20, 20))
+        privacy_row.addWidget(privacy_icon)
+        privacy_row.addWidget(
+            self._text_block(
+                "位置隐私",
+                "当前版本只在本机比较坐标，不联网查询地点名称。",
+            ),
+            1,
+        )
+        privacy_layout.addLayout(privacy_row)
+        layout.addWidget(privacy_group)
+        layout.addStretch()
+        return page
+
     def _build_experiments_page(self) -> QWidget:
         page, layout = self._page(
             "实验功能",
@@ -1262,6 +1515,15 @@ class SettingsView(QWidget):
         self.time_window.blockSignals(True)
         self.time_window.setValue(time_window)
         self.time_window.blockSignals(False)
+
+        gap_minutes = int(self.preferences.value("organize/gap_minutes", 180))
+        self.organization_gap.blockSignals(True)
+        self.organization_gap.setValue(gap_minutes)
+        self.organization_gap.blockSignals(False)
+        gps_radius = int(self.preferences.value("organize/gps_radius_km", 2))
+        self.organization_radius.blockSignals(True)
+        self.organization_radius.setValue(gps_radius)
+        self.organization_radius.blockSignals(False)
 
         preset = str(self.preferences.value("review/preset", "balanced"))
         self.preset_combo.blockSignals(True)
@@ -1458,6 +1720,12 @@ class MainWindow(QMainWindow):
         self.undo_button.clicked.connect(self._undo_move)
         header_layout.addWidget(self.undo_button)
 
+        self.organize_button = FeedbackButton("整理")
+        self.organize_button.setIcon(_icon("folder-marker-outline"))
+        self.organize_button.setToolTip("预览智能整理建议")
+        self.organize_button.clicked.connect(self._open_organization)
+        header_layout.addWidget(self.organize_button)
+
         self.move_button = FeedbackButton("移动保留项")
         self.move_button.setIcon(_icon("export-variant", "#173325"))
         self.move_button.setIconSize(QSize(18, 18))
@@ -1481,6 +1749,9 @@ class MainWindow(QMainWindow):
         self.settings_view.reanalyze_requested.connect(self._reanalyze_from_settings)
         self.settings_view.preferences_changed.connect(self._settings_changed)
         self.root_stack.addWidget(self.settings_view)
+        self.organization_view = OrganizationView(self)
+        self.organization_view.back_requested.connect(self._close_organization)
+        self.root_stack.addWidget(self.organization_view)
         self.setCentralWidget(self.root_stack)
         status = QStatusBar()
         self.progress = QProgressBar()
@@ -1785,6 +2056,7 @@ class MainWindow(QMainWindow):
         self.folder_button.hide()
         self.sidebar_review_panel.hide()
         self.undo_button.hide()
+        self.organize_button.hide()
         self.move_button.hide()
         self.settings_button.setChecked(False)
         self.content_stack.setCurrentIndex(0)
@@ -1806,6 +2078,25 @@ class MainWindow(QMainWindow):
         self.settings_button.setChecked(True)
         self.statusBar().hide()
         self.root_stack.setCurrentWidget(self.settings_view)
+
+    def _open_organization(self) -> None:
+        if not self.groups:
+            return
+        gap_minutes = int(self.preferences.value("organize/gap_minutes", 180))
+        gps_radius = float(self.preferences.value("organize/gps_radius_km", 2))
+        plan = build_organization_plan(
+            self._all_photos(),
+            gap_minutes=gap_minutes,
+            gps_radius_km=gps_radius,
+        )
+        self.organization_view.set_plan(plan)
+        self.statusBar().hide()
+        self.root_stack.setCurrentWidget(self.organization_view)
+
+    def _close_organization(self) -> None:
+        self.root_stack.setCurrentWidget(self.workspace)
+        self.statusBar().show()
+        self._apply_group_filter()
 
     def _close_settings(self) -> None:
         self._load_preferences()
@@ -2025,6 +2316,7 @@ class MainWindow(QMainWindow):
                 self.folder_button.show()
                 self.sidebar_review_panel.show()
                 self.undo_button.show()
+                self.organize_button.show()
                 self.move_button.show()
                 self.content_stack.setCurrentIndex(1)
                 QTimer.singleShot(0, self._reflow_cards)
@@ -2038,6 +2330,7 @@ class MainWindow(QMainWindow):
                 self.folder_button.show()
                 self.sidebar_review_panel.show()
                 self.undo_button.show()
+                self.organize_button.show()
                 self.move_button.show()
                 self.content_stack.setCurrentIndex(1)
                 QTimer.singleShot(0, self._reflow_cards)
@@ -2655,6 +2948,61 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
         #reviewWorkspace, QScrollArea, #photo_grid_host {
             background: #121315;
         }
+        #organizationView, #organizationDetail {
+            background: #121315;
+        }
+        #organizationHeader {
+            min-height: 54px;
+            background: #17191c;
+            border-bottom: 1px solid #2c3035;
+        }
+        #organizationTitle {
+            color: #f3f4f5;
+            font-size: 16px;
+            font-weight: 600;
+        }
+        #organizationSummary, #organizationGroupMeta {
+            color: #8e949b;
+            font-size: 12px;
+        }
+        #organizationSafety {
+            padding: 5px 9px;
+            color: #9de0bd;
+            background: #20362b;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+        #organizationSidebar {
+            min-width: 270px;
+            max-width: 340px;
+            background: #181a1d;
+            border-right: 1px solid #2c3035;
+        }
+        #organizationNameEdit {
+            min-height: 40px;
+            padding: 0 11px;
+            color: #f1f2f3;
+            background: #202327;
+            border: 1px solid #373b41;
+            border-radius: 6px;
+            font-size: 15px;
+        }
+        #organizationNameEdit:focus {
+            border-color: #8ec5ff;
+        }
+        #organizationPhotoList {
+            padding: 4px;
+            background: #181a1d;
+            border: 1px solid #2f3338;
+            border-radius: 6px;
+        }
+        #organizationPhotoList::item {
+            padding: 5px 8px;
+            border-bottom: 1px solid #292d31;
+        }
+        #organizationPhotoList::item:selected {
+            background: #30404f;
+        }
         #reviewToolbar {
             background: transparent;
             border: 0;
@@ -3044,13 +3392,14 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
         stylesheet += """
             QMainWindow, #appRoot, QStackedWidget, #emptyState,
             #reviewWorkspace, QScrollArea, #photo_grid_host,
-            #settingsView, #settingsContent, #settingsPages, #settingsPage {
+            #settingsView, #settingsContent, #settingsPages, #settingsPage,
+            #organizationView, #organizationDetail {
                 background: #08090a;
             }
             #header, QStatusBar {
                 background: #101113;
             }
-            #sidebar, #settingsSidebar {
+            #sidebar, #settingsSidebar, #organizationSidebar {
                 background: #111315;
             }
             #photoCard, #settingsGroup {
