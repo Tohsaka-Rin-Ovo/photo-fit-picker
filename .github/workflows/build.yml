@@ -63,7 +63,7 @@ jobs:
         run: |
           $env:APP_VERSION = $env:APP_VERSION -replace '^v', ''
           if ($env:APP_VERSION -notmatch '^\d+\.\d+\.\d+') {
-            $env:APP_VERSION = '0.1.1-dev'
+            $env:APP_VERSION = '0.1.2-dev'
           }
           New-Item -ItemType Directory -Force -Path dist/release
           $compiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
@@ -90,7 +90,7 @@ jobs:
       - build-windows
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: release-assets
           merge-multiple: true
@@ -100,6 +100,7 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             release-assets/PhotoFitPicker-* \
