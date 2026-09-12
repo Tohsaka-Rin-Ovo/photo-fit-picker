@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +12,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRectF,
     QSize,
+    QStandardPaths,
     Qt,
     QThread,
     QTimer,
@@ -92,6 +95,31 @@ def _read_preview(path: Path, target: QSize) -> QImage:
             ).copy()
     except Exception:
         return QImage()
+
+
+def _bundled_demo_folder() -> Optional[Path]:
+    if getattr(sys, "frozen", False):
+        root = Path(getattr(sys, "_MEIPASS", Path.cwd()))
+    else:
+        root = Path(__file__).resolve().parents[2]
+    folder = root / "demo-photos"
+    return folder if folder.is_dir() else None
+
+
+def _prepare_demo_folder() -> Path:
+    source = _bundled_demo_folder()
+    if source is None:
+        raise FileNotFoundError("没有找到内置演示照片")
+
+    cache_root = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.CacheLocation
+    )
+    destination = Path(cache_root or Path.home() / ".photo-fit-picker") / "demo-photos"
+    destination.mkdir(parents=True, exist_ok=True)
+    for photo in source.iterdir():
+        if photo.is_file() and photo.suffix.lower() in SUPPORTED_EXTENSIONS:
+            shutil.copy2(photo, destination / photo.name)
+    return destination
 
 
 class _RippleFeedback:
@@ -722,6 +750,11 @@ class MainWindow(QMainWindow):
         choose.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DirOpenIcon))
         choose.clicked.connect(self._choose_source)
         empty_layout.addWidget(choose, alignment=Qt.AlignmentFlag.AlignCenter)
+        demo = FeedbackButton("试用演示照片")
+        demo.setObjectName("quietButton")
+        demo.clicked.connect(self._load_demo_photos)
+        demo.setVisible(_bundled_demo_folder() is not None)
+        empty_layout.addWidget(demo, alignment=Qt.AlignmentFlag.AlignCenter)
         self.content_stack.addWidget(empty)
 
         review = QWidget()
@@ -838,6 +871,19 @@ class MainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "选择照片文件夹")
         if selected:
             self._set_source(Path(selected))
+
+    def _load_demo_photos(self) -> None:
+        try:
+            folder = _prepare_demo_folder()
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "演示照片不可用",
+                f"无法准备演示照片：{exc}",
+            )
+            return
+        self._set_source(folder)
+        self._start_analysis()
 
     def _set_source(self, folder: Path) -> None:
         self.source_folder = folder

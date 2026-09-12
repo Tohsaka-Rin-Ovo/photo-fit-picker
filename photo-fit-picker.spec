@@ -11,7 +11,7 @@ a = Analysis(
     ["run_app.py"],
     pathex=["src"],
     binaries=heif_binaries + raw_binaries,
-    datas=heif_data + raw_data,
+    datas=heif_data + raw_data + [("demo-photos", "demo-photos")],
     hiddenimports=heif_hidden + raw_hidden + ["photo_fit_picker.ui"],
     noarchive=False,
 )
