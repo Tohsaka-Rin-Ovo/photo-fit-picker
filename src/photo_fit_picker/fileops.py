@@ -94,14 +94,16 @@ def _write_history(destination: Path, entries: list[MoveEntry]) -> None:
     )
 
 
-def move_selected(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
+def _move_photos(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
     destination.mkdir(parents=True, exist_ok=True)
     history = read_history(destination)
     moved: list[MoveEntry] = []
     batch_time = datetime.now().isoformat(timespec="microseconds")
     try:
         for photo in photos:
-            if photo.status != ReviewStatus.KEPT or not photo.path.exists():
+            if photo.status in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+                continue
+            if not photo.path.is_file():
                 continue
             target = _available_destination(destination, photo.path.name)
             source = photo.path.resolve()
@@ -115,10 +117,21 @@ def move_selected(photos: Iterable[PhotoRecord], destination: Path) -> list[Move
             history.append(entry)
             photo.path = target
             photo.status = ReviewStatus.MOVED
+            photo.selected = False
     finally:
         if moved:
             _write_history(destination, history)
     return moved
+
+
+def move_selected(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
+    kept = (photo for photo in photos if photo.status == ReviewStatus.KEPT)
+    return _move_photos(kept, destination)
+
+
+def move_photos(photos: Iterable[PhotoRecord], destination: Path) -> list[MoveEntry]:
+    """Move only the photo records explicitly supplied by the caller."""
+    return _move_photos(photos, destination)
 
 
 def move_photo_to_trash(photo: PhotoRecord) -> Path:
@@ -128,6 +141,7 @@ def move_photo_to_trash(photo: PhotoRecord) -> Path:
         raise FileNotFoundError(f"找不到照片：{source}")
     _send2trash(str(source))
     photo.status = ReviewStatus.TRASHED
+    photo.selected = False
     return source
 
 

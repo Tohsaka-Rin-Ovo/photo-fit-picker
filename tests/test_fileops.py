@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from photo_fit_picker.fileops import (
     move_photo_to_trash,
+    move_photos,
     move_selected,
     read_history,
     undo_last_move,
@@ -29,6 +30,29 @@ def make_photo(path: Path, status: ReviewStatus) -> PhotoRecord:
 
 
 class FileOperationTests(unittest.TestCase):
+    def test_explicit_batch_move_does_not_include_other_kept_photos(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            destination = root / "picked"
+            source.mkdir()
+            selected_path = source / "selected.jpg"
+            other_path = source / "other-kept.jpg"
+            selected_path.write_bytes(b"selected")
+            other_path.write_bytes(b"other")
+            selected = make_photo(selected_path, ReviewStatus.PENDING)
+            selected.selected = True
+            other_kept = make_photo(other_path, ReviewStatus.KEPT)
+
+            moved = move_photos([selected], destination)
+
+            self.assertEqual(len(moved), 1)
+            self.assertTrue((destination / "selected.jpg").exists())
+            self.assertFalse(selected_path.exists())
+            self.assertFalse(selected.selected)
+            self.assertTrue(other_path.exists())
+            self.assertEqual(other_kept.status, ReviewStatus.KEPT)
+
     def test_rejected_photo_is_never_deleted_or_moved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

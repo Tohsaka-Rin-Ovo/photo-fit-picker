@@ -26,11 +26,13 @@ from PySide6.QtGui import (
     QKeySequence,
     QPainter,
     QPainterPath,
+    QPen,
     QPixmap,
     QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -60,7 +62,7 @@ from PySide6.QtWidgets import (
 from PIL import Image, ImageOps
 
 from .analysis import SUPPORTED_EXTENSIONS, discover_images
-from .fileops import move_photo_to_trash, move_selected, undo_last_move
+from .fileops import move_photo_to_trash, move_photos, move_selected, undo_last_move
 from .models import PhotoGroup, PhotoRecord, ReviewStatus
 from .worker import AnalysisWorker
 
@@ -172,8 +174,46 @@ class FeedbackToolButton(QToolButton):
         self._ripple.paint()
 
 
+class SelectionCheckBox(QCheckBox):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("选择照片")
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        box = QRectF(3, 3, 20, 20)
+        if not self.isEnabled():
+            painter.setPen(QPen(QColor("#aeb5b1"), 1.5))
+            painter.setBrush(QColor("#dfe3e0"))
+        elif self.isChecked():
+            painter.setPen(QPen(QColor("#ffffff"), 1.5))
+            painter.setBrush(QColor("#347c9b"))
+        else:
+            painter.setPen(QPen(QColor("#aeb8b3"), 1.5))
+            painter.setBrush(QColor("#ffffff"))
+        painter.drawRoundedRect(box, 5, 5)
+        if self.isChecked():
+            painter.setPen(
+                QPen(
+                    QColor("#ffffff"),
+                    2.2,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                    Qt.PenJoinStyle.RoundJoin,
+                )
+            )
+            check = QPainterPath(QPointF(7.5, 13.2))
+            check.lineTo(QPointF(11.2, 17.0))
+            check.lineTo(QPointF(18.7, 9.0))
+            painter.drawPath(check)
+
+
 class PhotoCard(QFrame):
     status_changed = Signal()
+    selection_changed = Signal()
     open_requested = Signal(object)
     trash_requested = Signal(object)
 
@@ -207,6 +247,15 @@ class PhotoCard(QFrame):
         self.preview.clicked.connect(lambda: self.open_requested.emit(self.photo))
         preview_layout.addWidget(self.preview)
         layout.addWidget(preview_frame)
+
+        self.select_box = SelectionCheckBox()
+        self.select_box.setObjectName("photoSelect")
+        self.select_box.setToolTip("选择照片以执行批量操作")
+        self.select_box.setChecked(photo.selected)
+        self.select_box.setParent(preview_frame)
+        self.select_box.move(188, 8)
+        self.select_box.stateChanged.connect(self._selection_changed)
+        self.select_box.raise_()
 
         if recommended:
             badge = QLabel("推荐")
@@ -281,6 +330,13 @@ class PhotoCard(QFrame):
         self.feedback_timer.start(170)
         self.status_changed.emit()
 
+    def _selection_changed(self, state: int) -> None:
+        self.photo.selected = state == Qt.CheckState.Checked.value
+        self.setProperty("selected", self.photo.selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.selection_changed.emit()
+
     def _clear_feedback(self) -> None:
         self.setProperty("feedback", False)
         self.style().unpolish(self)
@@ -317,7 +373,18 @@ class PhotoCard(QFrame):
         self.trash_button.setEnabled(
             self.photo.status != ReviewStatus.TRASHED and self.photo.path.is_file()
         )
+        self.select_box.setEnabled(not is_final)
+        if is_final and self.select_box.isChecked():
+            self.select_box.blockSignals(True)
+            self.select_box.setChecked(False)
+            self.select_box.blockSignals(False)
+            self.photo.selected = False
+        elif self.select_box.isChecked() != self.photo.selected:
+            self.select_box.blockSignals(True)
+            self.select_box.setChecked(self.photo.selected)
+            self.select_box.blockSignals(False)
         self.setProperty("reviewStatus", self.photo.status.value)
+        self.setProperty("selected", self.photo.selected)
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -671,6 +738,9 @@ class MainWindow(QMainWindow):
         group_text.addWidget(self.group_meta)
         toolbar.addLayout(group_text)
         toolbar.addStretch()
+        select_group = FeedbackButton("选择本组")
+        select_group.clicked.connect(self._select_current_group)
+        toolbar.addWidget(select_group)
         reject_all = FeedbackButton("全部排除")
         reject_all.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_DialogCancelButton)
@@ -703,6 +773,44 @@ class MainWindow(QMainWindow):
         self.photo_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.photo_scroll.setWidget(self.photo_grid_host)
         review_layout.addWidget(self.photo_scroll, 1)
+        self.batch_bar = QFrame()
+        self.batch_bar.setObjectName("batchBar")
+        batch_layout = QHBoxLayout(self.batch_bar)
+        batch_layout.setContentsMargins(12, 8, 12, 8)
+        batch_layout.setSpacing(8)
+        self.batch_count = QLabel("已选择 0 张")
+        self.batch_count.setObjectName("batchCount")
+        batch_layout.addWidget(self.batch_count)
+        batch_layout.addStretch()
+        clear_selection = FeedbackButton("清除选择")
+        clear_selection.setObjectName("quietButton")
+        clear_selection.clicked.connect(self._clear_selection)
+        batch_layout.addWidget(clear_selection)
+        batch_reject = FeedbackButton("标为排除")
+        batch_reject.clicked.connect(
+            lambda: self._set_selected_status(ReviewStatus.REJECTED)
+        )
+        batch_layout.addWidget(batch_reject)
+        batch_keep = FeedbackButton("标为保留")
+        batch_keep.clicked.connect(lambda: self._set_selected_status(ReviewStatus.KEPT))
+        batch_layout.addWidget(batch_keep)
+        batch_trash = FeedbackToolButton()
+        batch_trash.setObjectName("trashButton")
+        batch_trash.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
+        )
+        batch_trash.setToolTip("将所选照片移到系统回收站")
+        batch_trash.clicked.connect(self._confirm_trash_selected)
+        batch_layout.addWidget(batch_trash)
+        batch_move = FeedbackButton("移动到…")
+        batch_move.setObjectName("primaryButton")
+        batch_move.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowForward)
+        )
+        batch_move.clicked.connect(self._move_explicit_selection)
+        batch_layout.addWidget(batch_move)
+        review_layout.addWidget(self.batch_bar)
+        self.batch_bar.hide()
         self.content_stack.addWidget(review)
         return self.content_stack
 
@@ -711,6 +819,14 @@ class MainWindow(QMainWindow):
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._choose_source)
         self.addAction(open_action)
+        select_all_action = QAction(self)
+        select_all_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        select_all_action.triggered.connect(self._select_current_group)
+        self.addAction(select_all_action)
+        clear_action = QAction(self)
+        clear_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        clear_action.triggered.connect(self._clear_selection)
+        self.addAction(clear_action)
 
     def _show_empty_state(self) -> None:
         self.content_stack.setCurrentIndex(0)
@@ -889,6 +1005,7 @@ class MainWindow(QMainWindow):
         for index, photo in enumerate(group.photos):
             card = PhotoCard(photo, photo is recommended)
             card.status_changed.connect(self._review_changed)
+            card.selection_changed.connect(self._selection_changed)
             card.open_requested.connect(self._open_viewer)
             card.trash_requested.connect(self._confirm_trash)
             self.cards.append(card)
@@ -930,6 +1047,45 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             card.sync_status()
         self._review_changed()
+
+    def _all_photos(self) -> list[PhotoRecord]:
+        return [photo for group in self.groups for photo in group.photos]
+
+    def _selected_photos(self) -> list[PhotoRecord]:
+        return [photo for photo in self._all_photos() if photo.selected]
+
+    def _selection_changed(self) -> None:
+        selected = self._selected_photos()
+        self.batch_count.setText(f"已选择 {len(selected)} 张")
+        self.batch_bar.setVisible(bool(selected))
+
+    def _select_current_group(self) -> None:
+        group = self._current_group()
+        if not group:
+            return
+        for photo in group.photos:
+            if photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+                photo.selected = True
+        for card in self.cards:
+            card.sync_status()
+        self._selection_changed()
+
+    def _clear_selection(self) -> None:
+        for photo in self._all_photos():
+            photo.selected = False
+        for card in self.cards:
+            card.sync_status()
+        self._selection_changed()
+
+    def _set_selected_status(self, status: ReviewStatus) -> None:
+        selected = self._selected_photos()
+        for photo in selected:
+            if photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+                photo.status = status
+        for card in self.cards:
+            card.sync_status()
+        self._refresh_group_labels()
+        self._update_summary()
 
     def _open_viewer(self, photo: PhotoRecord) -> None:
         group = self._current_group()
@@ -988,6 +1144,85 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             if card.photo is photo:
                 card.sync_status()
+        self._refresh_group_labels()
+        self._update_summary()
+
+    def _confirm_trash_selected(self) -> None:
+        selected = self._selected_photos()
+        if not selected:
+            return
+        answer = QMessageBox.warning(
+            self,
+            "确认批量移到回收站",
+            f"确定要将选中的 {len(selected)} 张照片移到"
+            "系统废纸篓/回收站吗？\n\n"
+            "这不是永久删除，可从系统废纸篓/回收站恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        moved_count = 0
+        errors: list[str] = []
+        for photo in selected:
+            try:
+                move_photo_to_trash(photo)
+                moved_count += 1
+            except OSError as exc:
+                errors.append(f"{photo.display_name}：{exc}")
+        self.statusBar().showMessage(
+            f"已将 {moved_count} 张照片移到系统回收站",
+            8000,
+        )
+        for card in self.cards:
+            card.sync_status()
+        self._selection_changed()
+        self._refresh_group_labels()
+        self._update_summary()
+        if errors:
+            QMessageBox.warning(
+                self,
+                "部分照片未能处理",
+                "\n".join(errors[:8]),
+            )
+
+    def _move_explicit_selection(self) -> None:
+        selected = self._selected_photos()
+        if not selected:
+            return
+        start = str(self.destination_folder or self.source_folder or Path.home())
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            f"将 {len(selected)} 张照片移动到…",
+            start,
+        )
+        if not destination:
+            return
+        destination_path = Path(destination)
+        answer = QMessageBox.question(
+            self,
+            "确认批量移动",
+            f"将选中的 {len(selected)} 张照片移动到：\n{destination_path}\n\n"
+            "移动后可通过顶部撤销按钮恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            moved = move_photos(selected, destination_path)
+        except OSError as exc:
+            QMessageBox.critical(self, "批量移动未完成", str(exc))
+            for card in self.cards:
+                card.sync_status()
+            self._selection_changed()
+            return
+        self.destination_folder = destination_path
+        self.destination_button.setToolTip(f"目标文件夹：{destination_path}")
+        self.statusBar().showMessage(f"已移动 {len(moved)} 张照片", 8000)
+        for card in self.cards:
+            card.sync_status()
+        self._selection_changed()
         self._refresh_group_labels()
         self._update_summary()
 
@@ -1238,9 +1473,16 @@ def apply_theme(app: QApplication) -> None:
             border-color: #abb5b0;
             background: #fdfefd;
         }
+        #photoCard[selected="true"] {
+            border: 2px solid #347c9b;
+            background: #f4f9fb;
+        }
         #photoCard[reviewStatus="kept"] {
             background: #f4faf7;
             border: 2px solid #25805f;
+        }
+        #photoCard[reviewStatus="kept"][selected="true"] {
+            border: 2px solid #347c9b;
         }
         #photoCard[reviewStatus="rejected"] {
             background: #ebeeec;
@@ -1277,6 +1519,42 @@ def apply_theme(app: QApplication) -> None:
             color: #ffffff;
             background: #646d69;
             border-color: #646d69;
+        }
+        #batchBar {
+            min-height: 48px;
+            max-height: 48px;
+            background: #202724;
+            border: 1px solid #343e3a;
+            border-radius: 7px;
+        }
+        #batchCount {
+            min-width: 88px;
+            color: #ffffff;
+            font-weight: 700;
+        }
+        #batchBar QPushButton, #batchBar QToolButton {
+            color: #eef2ef;
+            background: #303936;
+            border-color: #4b5752;
+        }
+        #batchBar QPushButton:hover, #batchBar QToolButton:hover {
+            background: #3a4540;
+            border-color: #74827b;
+        }
+        #batchBar #primaryButton {
+            color: #ffffff;
+            background: #1f795b;
+            border-color: #1f795b;
+        }
+        #batchBar #quietButton {
+            color: #bdc7c2;
+            background: transparent;
+            border-color: transparent;
+        }
+        #batchBar #trashButton:hover {
+            color: #ffd9d5;
+            background: #653a37;
+            border-color: #925652;
         }
         QSlider::groove:horizontal {
             height: 4px;

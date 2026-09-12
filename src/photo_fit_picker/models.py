@@ -28,6 +28,7 @@ class PhotoRecord:
     exposure: float
     status: ReviewStatus = ReviewStatus.PENDING
     group_id: int = -1
+    selected: bool = False
 
     @property
     def display_name(self) -> str:
