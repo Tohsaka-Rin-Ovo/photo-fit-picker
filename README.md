@@ -18,6 +18,7 @@ Windows 使用同一套界面和业务代码，安装包将在后续版本提供
 
 - 拖入或选择整个照片文件夹，递归扫描常规图片、HEIC 和主流相机 RAW。
 - 根据 EXIF 时间、感知哈希和色彩分布对近似照片分组。
+- 读取相机、镜头、快门、光圈、ISO、焦距、GPS，以及部分 Nikon MakerNote 参数。
 - 以清晰度和曝光为依据标出每组最佳照片，但不会自动移动。
 - 支持单张保留/排除、本组全部保留/排除，以及一键保留最佳并进入下一组。
 - 点击缩略图可打开大图，并在组内前后翻看和继续标记。
@@ -36,6 +37,8 @@ Windows 使用同一套界面和业务代码，安装包将在后续版本提供
 常规格式包括 JPG、JPEG、PNG、WebP、BMP、TIFF、HEIC 和 HEIF。
 
 RAW 通过 LibRaw/rawpy 读取，目前纳入扫描的格式包括 Canon CR2/CR3/CRW、Nikon NEF/NRW、Sony ARW/SR2/SRF、Fujifilm RAF、Adobe DNG、Panasonic RW2/RWL、Olympus ORF/ORI、Pentax PEF/PTX、Samsung SRW、Sigma X3F，以及 3FR、DCR、ERF、FFF、GPR、IIQ、KDC、MEF、MOS、MRW、R3D 等格式。
+
+ExifRead 会直接从常规图片和多数 RAW 容器读取标准拍摄参数；Nikon 文件还会尽可能提取对焦模式、拍摄模式、防抖和 Picture Control 等 MakerNote 信息。不同机型写入的私有字段并不完全一致，无法识别时只留空，不会阻止照片导入。
 
 程序优先使用 RAW 内嵌预览图进行快速分析；没有预览图时才进行半尺寸显影。移动、撤销和回收站操作针对完整 RAW 原文件，不会把预览图写回原文件。新相机或厂商特殊 RAW 变体能否读取取决于安装包所带的 LibRaw 版本。
 

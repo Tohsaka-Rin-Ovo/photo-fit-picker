@@ -9,6 +9,7 @@ description = "A local-first desktop app for grouping and reviewing similar phot
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
+    "ExifRead>=3.0,<4",
     "Pillow>=10.0,<13",
     "PySide6-Essentials>=6.6,<7",
     "pillow-heif>=0.16,<1",

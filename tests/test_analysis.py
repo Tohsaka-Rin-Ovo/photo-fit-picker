@@ -8,12 +8,15 @@ from unittest.mock import patch
 
 import numpy
 from PIL import Image
+from PIL.TiffImagePlugin import IFDRational
 
 import photo_fit_picker.analysis as analysis_module
 from photo_fit_picker.analysis import (
     RAW_EXTENSIONS,
+    _gps_coordinate,
     discover_images,
     extract_feature,
+    extract_metadata,
     group_similar_photos,
     hamming_distance,
     visual_similarity,
@@ -36,6 +39,56 @@ def make_photo(name: str, hash_value: int, seconds: int, color: tuple[float, ...
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_extracts_camera_and_shooting_metadata_from_jpeg(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "nikon.jpg"
+            exif = Image.Exif()
+            exif[271] = "NIKON CORPORATION"
+            exif[272] = "NIKON Z 8"
+            exif[36867] = "2026:09:12 14:35:06"
+            exif[33434] = IFDRational(1, 250)
+            exif[33437] = IFDRational(28, 10)
+            exif[34855] = 640
+            exif[37386] = IFDRational(85, 1)
+            exif[42036] = "NIKKOR Z 85mm f/1.8 S"
+            Image.new("RGB", (640, 480), (80, 120, 160)).save(path, exif=exif)
+
+            record = extract_feature(path)
+
+        self.assertEqual(record.captured_at, datetime(2026, 9, 12, 14, 35, 6))
+        self.assertEqual(record.metadata.make, "NIKON CORPORATION")
+        self.assertEqual(record.metadata.model, "NIKON Z 8")
+        self.assertEqual(record.metadata.lens, "NIKKOR Z 85mm f/1.8 S")
+        self.assertAlmostEqual(record.metadata.exposure_time or 0, 1 / 250)
+        self.assertAlmostEqual(record.metadata.aperture or 0, 2.8)
+        self.assertEqual(record.metadata.iso, 640)
+        self.assertEqual(record.metadata.focal_length, 85)
+        self.assertIn("1/250 秒", record.metadata.shooting_summary)
+
+    def test_gps_dms_coordinates_are_converted(self) -> None:
+        value = SimpleNamespace(
+            values=[IFDRational(31, 1), IFDRational(13, 1), IFDRational(48, 1)]
+        )
+
+        self.assertAlmostEqual(_gps_coordinate(value, "N") or 0, 31.23)
+        self.assertAlmostEqual(_gps_coordinate(value, "W") or 0, -31.23)
+
+    def test_missing_or_damaged_metadata_falls_back_safely(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "plain.jpg"
+            Image.new("RGB", (32, 24), "white").save(path)
+            self.assertEqual(extract_metadata(path).camera_label, "")
+
+            with patch.object(
+                analysis_module.exifread,
+                "process_file",
+                side_effect=RuntimeError("damaged maker note"),
+            ):
+                metadata = extract_metadata(path)
+
+        self.assertEqual(metadata.shooting_summary, "")
+        self.assertFalse(metadata.has_location)
+
     def test_common_camera_raw_extensions_are_discovered(self) -> None:
         expected = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".dng", ".rw2"}
         self.assertTrue(expected.issubset(RAW_EXTENSIONS))

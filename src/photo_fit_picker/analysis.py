@@ -3,11 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from PIL import Image, ImageFilter, ImageOps, ImageStat
 
-from .models import PhotoGroup, PhotoRecord
+from .models import CameraMetadata, PhotoGroup, PhotoRecord
+
+try:
+    import exifread
+except ImportError:
+    exifread = None
 
 try:
     from pillow_heif import register_heif_opener
@@ -78,6 +83,152 @@ RAW_EXTENSIONS = {
 }
 
 SUPPORTED_EXTENSIONS = STANDARD_EXTENSIONS | RAW_EXTENSIONS
+
+
+def _first_tag(tags: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        value = tags.get(name)
+        if value is not None:
+            return value
+    return None
+
+
+def _tag_text(tags: Mapping[str, Any], *names: str) -> str:
+    value = _first_tag(tags, *names)
+    if value is None:
+        return ""
+    return " ".join(str(value).replace("\x00", "").split())
+
+
+def _numeric_value(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    values = getattr(value, "values", value)
+    if isinstance(values, (list, tuple)):
+        if not values:
+            return None
+        values = values[0]
+    numerator = getattr(values, "num", None)
+    denominator = getattr(values, "den", None)
+    if numerator is not None and denominator:
+        return float(numerator) / float(denominator)
+    try:
+        return float(values)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _gps_coordinate(value: Any, reference: str) -> Optional[float]:
+    values = getattr(value, "values", value)
+    if not isinstance(values, (list, tuple)) or len(values) < 3:
+        return None
+    parts = [_numeric_value(part) for part in values[:3]]
+    if any(part is None for part in parts):
+        return None
+    degrees, minutes, seconds = (float(part) for part in parts if part is not None)
+    coordinate = degrees + minutes / 60 + seconds / 3600
+    if reference.upper().startswith(("S", "W")):
+        coordinate *= -1
+    return coordinate
+
+
+def _metadata_capture_time(tags: Mapping[str, Any]) -> Optional[datetime]:
+    raw = _tag_text(
+        tags,
+        "EXIF DateTimeOriginal",
+        "EXIF DateTimeDigitized",
+        "Image DateTimeOriginal",
+        "Image DateTimeDigitized",
+        "Image DateTime",
+    )
+    if not raw:
+        return None
+    for pattern in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(raw[:19], pattern)
+        except ValueError:
+            continue
+    return None
+
+
+def _maker_note_details(tags: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    selected = (
+        ("focusmode", "对焦模式"),
+        ("shootingmode", "拍摄模式"),
+        ("vrinfo", "防抖"),
+        ("picturecontrol", "优化校准"),
+        ("lensdata", "镜头数据"),
+        ("colorspace", "色彩空间"),
+    )
+    details: list[tuple[str, str]] = []
+    for key, value in tags.items():
+        normalized = key.lower().replace(" ", "")
+        if "makernote" not in normalized:
+            continue
+        label = next((label for needle, label in selected if needle in normalized), "")
+        text = " ".join(str(value).replace("\x00", "").split())
+        if label and text and len(text) <= 120 and (label, text) not in details:
+            details.append((label, text))
+        if len(details) >= 8:
+            break
+    return tuple(details)
+
+
+def extract_metadata(path: Path) -> CameraMetadata:
+    if exifread is None:
+        return CameraMetadata()
+    try:
+        with path.open("rb") as stream:
+            tags = exifread.process_file(stream, details=True, strict=False)
+    except Exception:
+        return CameraMetadata()
+
+    exposure_time = _numeric_value(
+        _first_tag(tags, "EXIF ExposureTime", "Image ExposureTime")
+    )
+    aperture = _numeric_value(_first_tag(tags, "EXIF FNumber", "Image FNumber"))
+    iso_value = _numeric_value(
+        _first_tag(
+            tags,
+            "EXIF ISOSpeedRatings",
+            "EXIF PhotographicSensitivity",
+            "Image ISOSpeedRatings",
+            "Image PhotographicSensitivity",
+            "MakerNote ISOSetting",
+        )
+    )
+    latitude = _gps_coordinate(
+        _first_tag(tags, "GPS GPSLatitude"),
+        _tag_text(tags, "GPS GPSLatitudeRef"),
+    )
+    longitude = _gps_coordinate(
+        _first_tag(tags, "GPS GPSLongitude"),
+        _tag_text(tags, "GPS GPSLongitudeRef"),
+    )
+    return CameraMetadata(
+        captured_at=_metadata_capture_time(tags),
+        make=_tag_text(tags, "Image Make"),
+        model=_tag_text(tags, "Image Model"),
+        lens=_tag_text(tags, "EXIF LensModel", "Image LensModel", "MakerNote Lens"),
+        exposure_time=exposure_time,
+        aperture=aperture,
+        iso=round(iso_value) if iso_value is not None else None,
+        focal_length=_numeric_value(
+            _first_tag(tags, "EXIF FocalLength", "Image FocalLength")
+        ),
+        exposure_bias=_numeric_value(
+            _first_tag(tags, "EXIF ExposureBiasValue", "Image ExposureBiasValue")
+        ),
+        white_balance=_tag_text(tags, "MakerNote WhiteBalance", "EXIF WhiteBalance"),
+        focus_mode=_tag_text(tags, "MakerNote FocusMode"),
+        metering_mode=_tag_text(tags, "EXIF MeteringMode"),
+        exposure_program=_tag_text(tags, "EXIF ExposureProgram"),
+        flash=_tag_text(tags, "EXIF Flash"),
+        software=_tag_text(tags, "Image Software"),
+        latitude=latitude,
+        longitude=longitude,
+        details=_maker_note_details(tags),
+    )
 
 
 def discover_images(folder: Path, recursive: bool = True) -> list[Path]:
@@ -182,6 +333,7 @@ def _quality_metrics(image: Image.Image) -> tuple[float, float]:
 
 
 def extract_feature(path: Path) -> PhotoRecord:
+    metadata = extract_metadata(path)
     image, width, height, captured_at = _decoded_image(path)
     try:
         dhash = _difference_hash(image)
@@ -194,11 +346,12 @@ def extract_feature(path: Path) -> PhotoRecord:
         width=width,
         height=height,
         file_size=path.stat().st_size,
-        captured_at=captured_at,
+        captured_at=metadata.captured_at or captured_at,
         dhash=dhash,
         color_signature=signature,
         sharpness=sharpness,
         exposure=exposure,
+        metadata=metadata,
     )
 
 
