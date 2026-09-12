@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .analysis import analyze_paths, group_similar_photos
+from .models import AnalysisOptions
 
 
 class AnalysisWorker(QObject):
@@ -16,13 +17,11 @@ class AnalysisWorker(QObject):
     def __init__(
         self,
         paths: list[Path],
-        similarity_threshold: float,
-        time_window_seconds: int,
+        options: AnalysisOptions,
     ) -> None:
         super().__init__()
         self.paths = paths
-        self.similarity_threshold = similarity_threshold
-        self.time_window_seconds = time_window_seconds
+        self.options = options
         self._cancelled = False
 
     @Slot()
@@ -43,8 +42,7 @@ class AnalysisWorker(QObject):
             self.progress.emit(len(self.paths), len(self.paths), "正在整理相似照片…")
             groups = group_similar_photos(
                 records,
-                similarity_threshold=self.similarity_threshold,
-                time_window_seconds=self.time_window_seconds,
+                self.options,
             )
             self.finished.emit(groups, failures)
         except Exception as exc:

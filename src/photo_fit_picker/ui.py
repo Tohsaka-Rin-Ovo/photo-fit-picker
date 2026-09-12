@@ -70,7 +70,7 @@ from PIL import Image
 from . import __version__
 from .analysis import SUPPORTED_EXTENSIONS, discover_images, load_display_image
 from .fileops import move_photo_to_trash, move_photos, move_selected, undo_last_move
-from .models import PhotoGroup, PhotoRecord, ReviewStatus
+from .models import AnalysisOptions, PhotoGroup, PhotoRecord, ReviewStatus
 from .worker import AnalysisWorker
 
 
@@ -78,6 +78,12 @@ ICON_COLOR = "#d8dcdf"
 ICON_MUTED = "#777d84"
 ICON_ACCENT = "#9de0bd"
 ICON_DANGER = "#f08b91"
+
+REVIEW_PRESETS = {
+    "conservative": (90, 45, 14),
+    "balanced": (84, 90, 22),
+    "relaxed": (78, 180, 30),
+}
 
 
 def _icon(
@@ -579,12 +585,13 @@ class PhotoViewer(QDialog):
 
     def __init__(
         self,
-        photos: list[PhotoRecord],
+        group: PhotoGroup,
         start_index: int,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.photos = photos
+        self.group = group
+        self.photos = group.photos
         self.index = start_index
         self.setObjectName("photoViewer")
         self.setWindowTitle("照片预览")
@@ -744,14 +751,9 @@ class PhotoViewer(QDialog):
             self.metadata_grid.addWidget(label, row, 0)
             self.metadata_grid.addWidget(value, row, 1)
 
-        available = [
-            item
-            for item in self.photos
-            if item.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
-        ]
-        recommended = max(available, key=lambda item: item.quality_score) if available else None
+        recommended = self.group.recommended
         self.quality_label.setText(
-            f"{photo.quality_summary}\n综合质量 {photo.quality_score * 100:.0f} 分"
+            f"{photo.quality_summary}\n综合质量 {self.group.score(photo) * 100:.0f} 分"
         )
         self.reason_label.setText(
             "本组推荐 · 清晰度与曝光综合得分最高"
@@ -831,6 +833,7 @@ class SettingsView(QWidget):
         super().__init__(parent)
         self.preferences = QSettings()
         self.source_folder = source_folder
+        self._applying_preset = False
         self.setObjectName("settingsView")
 
         root_layout = QHBoxLayout(self)
@@ -862,6 +865,8 @@ class SettingsView(QWidget):
                 ("外观", "palette-outline"),
                 ("文件夹", "folder-outline"),
                 ("筛选", "tune-variant"),
+                ("算法", "chart-bell-curve-cumulative"),
+                ("实验功能", "flask-outline"),
             )
         ):
             button = FeedbackButton(text)
@@ -891,6 +896,8 @@ class SettingsView(QWidget):
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_folder_page())
         self.pages.addWidget(self._build_review_page())
+        self.pages.addWidget(self._build_algorithm_page())
+        self.pages.addWidget(self._build_experiments_page())
         self.pages.setMaximumWidth(760)
         content_layout.addWidget(self.pages, 1)
         content_layout.addStretch()
@@ -1054,6 +1061,23 @@ class SettingsView(QWidget):
 
     def _build_review_page(self) -> QWidget:
         page, layout = self._page("筛选", "调整相似照片成组时使用的判断范围。")
+        preset_group, preset_layout = self._group()
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(
+            self._text_block("筛选预设", "从稳妥的连拍识别到更宽松的相似画面归组。"),
+            1,
+        )
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("保守", "conservative")
+        self.preset_combo.addItem("均衡", "balanced")
+        self.preset_combo.addItem("宽松", "relaxed")
+        self.preset_combo.addItem("自定义", "custom")
+        preset = str(self.preferences.value("review/preset", "balanced"))
+        self.preset_combo.setCurrentIndex(max(0, self.preset_combo.findData(preset)))
+        preset_row.addWidget(self.preset_combo)
+        preset_layout.addLayout(preset_row)
+        layout.addWidget(preset_group)
+
         group, group_layout = self._group()
 
         similarity_row = QHBoxLayout()
@@ -1086,9 +1110,7 @@ class SettingsView(QWidget):
             int(self.preferences.value("review/time_window", 90))
         )
         self.time_window.setSuffix(" 秒")
-        self.time_window.valueChanged.connect(
-            lambda value: self.preferences.setValue("review/time_window", value)
-        )
+        self.time_window.valueChanged.connect(self._time_window_changed)
         time_row.addWidget(self.time_window)
         group_layout.addLayout(time_row)
         layout.addWidget(group)
@@ -1099,7 +1121,101 @@ class SettingsView(QWidget):
         self.reanalyze_button.clicked.connect(self.reanalyze_requested.emit)
         layout.addWidget(self.reanalyze_button, alignment=Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
+        self.preset_combo.currentIndexChanged.connect(self._preset_changed)
         self.set_analysis_available(self.source_folder is not None, False)
+        return page
+
+    def _build_algorithm_page(self) -> QWidget:
+        page, layout = self._page(
+            "算法",
+            "调整画面相似度和组内推荐的权重，修改后重新分析才会生效。",
+        )
+        similarity_group, similarity_layout = self._group()
+        color_row = QHBoxLayout()
+        color_row.addWidget(
+            self._text_block("色彩权重", "提高后，相同构图但色调差异大的照片更难归为一组。"),
+            1,
+        )
+        self.color_weight_value = QLabel()
+        self.color_weight_value.setObjectName("settingsValue")
+        color_row.addWidget(self.color_weight_value)
+        similarity_layout.addLayout(color_row)
+        self.color_weight_slider = QSlider(Qt.Orientation.Horizontal)
+        self.color_weight_slider.setRange(0, 50)
+        self.color_weight_slider.setValue(int(self.preferences.value("algorithm/color_weight", 22)))
+        self.color_weight_value.setText(f"{self.color_weight_slider.value()}%")
+        self.color_weight_slider.valueChanged.connect(self._color_weight_changed)
+        similarity_layout.addWidget(self.color_weight_slider)
+        layout.addWidget(similarity_group)
+
+        recommendation_group, recommendation_layout = self._group()
+        recommendation_layout.addWidget(
+            self._text_block("最佳照片推荐", "权重会自动归一化，不会修改照片本身。")
+        )
+        self.quality_sliders: dict[str, tuple[QSlider, QLabel]] = {}
+        for key, title, default in (
+            ("sharpness", "清晰度", 75),
+            ("exposure", "曝光", 25),
+            ("resolution", "分辨率", 0),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(title), 1)
+            value_label = QLabel()
+            value_label.setObjectName("settingsValue")
+            row.addWidget(value_label)
+            recommendation_layout.addLayout(row)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 100)
+            slider.setValue(int(self.preferences.value(f"algorithm/{key}_weight", default)))
+            value_label.setText(str(slider.value()))
+            slider.valueChanged.connect(
+                lambda value, name=key, label=value_label: self._quality_weight_changed(
+                    name, label, value
+                )
+            )
+            recommendation_layout.addWidget(slider)
+            self.quality_sliders[key] = (slider, value_label)
+        layout.addWidget(recommendation_group)
+        layout.addStretch()
+        return page
+
+    def _build_experiments_page(self) -> QWidget:
+        page, layout = self._page(
+            "实验功能",
+            "这些本地算法可以随时关闭，不会上传或改写照片。",
+        )
+        group, group_layout = self._group()
+        hash_row = QHBoxLayout()
+        hash_row.addWidget(
+            self._text_block("画面哈希", "差异哈希更关注结构；均值哈希对整体明暗变化更敏感。"),
+            1,
+        )
+        self.hash_method_combo = QComboBox()
+        self.hash_method_combo.addItem("差异哈希", "difference")
+        self.hash_method_combo.addItem("均值哈希（实验）", "average")
+        hash_method = str(self.preferences.value("algorithm/hash_method", "difference"))
+        self.hash_method_combo.setCurrentIndex(
+            max(0, self.hash_method_combo.findData(hash_method))
+        )
+        self.hash_method_combo.currentIndexChanged.connect(self._hash_method_changed)
+        hash_row.addWidget(self.hash_method_combo)
+        group_layout.addLayout(hash_row)
+        group_layout.addWidget(self._divider())
+
+        duplicate_row = QHBoxLayout()
+        duplicate_row.addWidget(
+            self._text_block("识别完全重复", "仅对文件大小相同的候选计算 SHA-256，可识别跨日期副本。"),
+            1,
+        )
+        self.exact_duplicate_toggle = SettingsSwitch()
+        self.exact_duplicate_toggle.setChecked(
+            _setting_bool(self.preferences, "algorithm/exact_duplicates", True)
+        )
+        self.exact_duplicate_toggle.toggled.connect(self._exact_duplicates_changed)
+        duplicate_row.addWidget(self.exact_duplicate_toggle)
+        group_layout.addLayout(duplicate_row)
+        layout.addWidget(group)
+        layout.addStretch()
         return page
 
     def _select_page(self, index: int) -> None:
@@ -1147,6 +1263,38 @@ class SettingsView(QWidget):
         self.time_window.setValue(time_window)
         self.time_window.blockSignals(False)
 
+        preset = str(self.preferences.value("review/preset", "balanced"))
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setCurrentIndex(max(0, self.preset_combo.findData(preset)))
+        self.preset_combo.blockSignals(False)
+
+        color_weight = int(self.preferences.value("algorithm/color_weight", 22))
+        self.color_weight_slider.blockSignals(True)
+        self.color_weight_slider.setValue(color_weight)
+        self.color_weight_slider.blockSignals(False)
+        self.color_weight_value.setText(f"{color_weight}%")
+
+        for key, (_slider, _label) in self.quality_sliders.items():
+            default = {"sharpness": 75, "exposure": 25, "resolution": 0}[key]
+            value = int(self.preferences.value(f"algorithm/{key}_weight", default))
+            slider, label = self.quality_sliders[key]
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+            label.setText(str(value))
+
+        hash_method = str(self.preferences.value("algorithm/hash_method", "difference"))
+        self.hash_method_combo.blockSignals(True)
+        self.hash_method_combo.setCurrentIndex(
+            max(0, self.hash_method_combo.findData(hash_method))
+        )
+        self.hash_method_combo.blockSignals(False)
+        self.exact_duplicate_toggle.blockSignals(True)
+        self.exact_duplicate_toggle.setChecked(
+            _setting_bool(self.preferences, "algorithm/exact_duplicates", True)
+        )
+        self.exact_duplicate_toggle.blockSignals(False)
+
     def _theme_changed(self) -> None:
         theme = str(self.theme_combo.currentData())
         self.preferences.setValue("appearance/theme", theme)
@@ -1157,6 +1305,56 @@ class SettingsView(QWidget):
     def _similarity_changed(self, value: int) -> None:
         self.similarity_value.setText(f"{value}%")
         self.preferences.setValue("review/similarity", value)
+        self._mark_custom_preset()
+
+    def _time_window_changed(self, value: int) -> None:
+        self.preferences.setValue("review/time_window", value)
+        self._mark_custom_preset()
+
+    def _preset_changed(self) -> None:
+        preset = str(self.preset_combo.currentData())
+        self.preferences.setValue("review/preset", preset)
+        values = REVIEW_PRESETS.get(preset)
+        if values is None:
+            return
+        similarity, time_window, color_weight = values
+        self._applying_preset = True
+        self.similarity_slider.setValue(similarity)
+        self.time_window.setValue(time_window)
+        self.color_weight_slider.setValue(color_weight)
+        self._applying_preset = False
+        self.preferences_changed.emit()
+
+    def _mark_custom_preset(self) -> None:
+        if self._applying_preset or not hasattr(self, "preset_combo"):
+            return
+        custom_index = self.preset_combo.findData("custom")
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.setCurrentIndex(custom_index)
+        self.preset_combo.blockSignals(False)
+        self.preferences.setValue("review/preset", "custom")
+        self.preferences_changed.emit()
+
+    def _color_weight_changed(self, value: int) -> None:
+        self.color_weight_value.setText(f"{value}%")
+        self.preferences.setValue("algorithm/color_weight", value)
+        self._mark_custom_preset()
+
+    def _quality_weight_changed(self, key: str, label: QLabel, value: int) -> None:
+        label.setText(str(value))
+        self.preferences.setValue(f"algorithm/{key}_weight", value)
+        self.preferences_changed.emit()
+
+    def _hash_method_changed(self) -> None:
+        self.preferences.setValue(
+            "algorithm/hash_method",
+            self.hash_method_combo.currentData(),
+        )
+        self.preferences_changed.emit()
+
+    def _exact_duplicates_changed(self, checked: bool) -> None:
+        self.preferences.setValue("algorithm/exact_duplicates", checked)
+        self.preferences_changed.emit()
 
     def _destination_mode_changed(self) -> None:
         self.preferences.setValue(
@@ -1198,6 +1396,7 @@ class MainWindow(QMainWindow):
         self.destination_folder: Optional[Path] = None
         self.similarity_threshold = 84
         self.time_window_seconds = 90
+        self.analysis_options = AnalysisOptions()
         self.destination_mode = "source"
         self._load_preferences()
         self.groups: list[PhotoGroup] = []
@@ -1298,6 +1497,27 @@ class MainWindow(QMainWindow):
         self.time_window_seconds = max(
             5,
             min(600, int(self.preferences.value("review/time_window", 90))),
+        )
+        self.analysis_options = AnalysisOptions(
+            similarity_threshold=self.similarity_threshold / 100.0,
+            time_window_seconds=self.time_window_seconds,
+            color_weight=max(
+                0.0,
+                min(0.5, int(self.preferences.value("algorithm/color_weight", 22)) / 100.0),
+            ),
+            hash_method=str(self.preferences.value("algorithm/hash_method", "difference")),
+            detect_exact_duplicates=_setting_bool(
+                self.preferences, "algorithm/exact_duplicates", True
+            ),
+            sharpness_weight=max(
+                0.0, int(self.preferences.value("algorithm/sharpness_weight", 75)) / 100.0
+            ),
+            exposure_weight=max(
+                0.0, int(self.preferences.value("algorithm/exposure_weight", 25)) / 100.0
+            ),
+            resolution_weight=max(
+                0.0, int(self.preferences.value("algorithm/resolution_weight", 0)) / 100.0
+            ),
         )
         self.destination_mode = str(
             self.preferences.value("folders/destination_mode", "source")
@@ -1711,8 +1931,7 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker = AnalysisWorker(
             paths,
-            self.similarity_threshold / 100.0,
-            self.time_window_seconds,
+            self.analysis_options,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1955,7 +2174,7 @@ class MainWindow(QMainWindow):
         group = self._current_group()
         if not group:
             return
-        viewer = PhotoViewer(group.photos, group.photos.index(photo), self)
+        viewer = PhotoViewer(group, group.photos.index(photo), self)
         viewer.status_changed.connect(self._review_changed)
         viewer.trash_requested.connect(self._confirm_trash)
         viewer.exec()

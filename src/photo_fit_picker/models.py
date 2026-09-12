@@ -16,6 +16,18 @@ class ReviewStatus(str, Enum):
 
 
 @dataclass(frozen=True)
+class AnalysisOptions:
+    similarity_threshold: float = 0.84
+    time_window_seconds: int = 90
+    color_weight: float = 0.22
+    hash_method: str = "difference"
+    detect_exact_duplicates: bool = True
+    sharpness_weight: float = 0.75
+    exposure_weight: float = 0.25
+    resolution_weight: float = 0.0
+
+
+@dataclass(frozen=True)
 class CameraMetadata:
     captured_at: Optional[datetime] = None
     make: str = ""
@@ -76,6 +88,7 @@ class PhotoRecord:
     color_signature: Tuple[float, ...]
     sharpness: float
     exposure: float
+    average_hash: int = 0
     metadata: CameraMetadata = field(default_factory=CameraMetadata)
     status: ReviewStatus = ReviewStatus.PENDING
     group_id: int = -1
@@ -138,6 +151,25 @@ class PhotoRecord:
 class PhotoGroup:
     id: int
     photos: list[PhotoRecord] = field(default_factory=list)
+    sharpness_weight: float = 0.75
+    exposure_weight: float = 0.25
+    resolution_weight: float = 0.0
+
+    def score(self, photo: PhotoRecord) -> float:
+        max_megapixels = max((item.megapixels for item in self.photos), default=1.0)
+        sharpness_quality = min(1.0, photo.sharpness / 0.12)
+        exposure_quality = max(0.0, 1.0 - abs(photo.exposure - 0.5) * 1.8)
+        resolution_quality = photo.megapixels / max_megapixels if max_megapixels else 0.0
+        total_weight = (
+            self.sharpness_weight + self.exposure_weight + self.resolution_weight
+        )
+        if total_weight <= 0:
+            return photo.quality_score
+        return (
+            sharpness_quality * self.sharpness_weight
+            + exposure_quality * self.exposure_weight
+            + resolution_quality * self.resolution_weight
+        ) / total_weight
 
     @property
     def recommended(self) -> Optional[PhotoRecord]:
@@ -148,7 +180,7 @@ class PhotoGroup:
         ]
         if not candidates:
             return None
-        return max(candidates, key=lambda photo: photo.quality_score)
+        return max(candidates, key=self.score)
 
     def recommendation_reason(self, photo: PhotoRecord) -> str:
         if photo is self.recommended:

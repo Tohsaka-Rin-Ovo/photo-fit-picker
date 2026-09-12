@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from PIL import Image, ImageFilter, ImageOps, ImageStat
 
-from .models import CameraMetadata, PhotoGroup, PhotoRecord
+from .models import AnalysisOptions, CameraMetadata, PhotoGroup, PhotoRecord
 
 try:
     import exifread
@@ -306,6 +307,16 @@ def _difference_hash(image: Image.Image) -> int:
     return value
 
 
+def _average_hash(image: Image.Image) -> int:
+    pixels = image.convert("L").resize((8, 8), Image.Resampling.LANCZOS).tobytes()
+    average = sum(pixels) / len(pixels)
+    value = 0
+    for pixel in pixels:
+        value <<= 1
+        value |= pixel >= average
+    return value
+
+
 def _color_signature(image: Image.Image) -> tuple[float, ...]:
     rgb = image.convert("RGB").resize((96, 96), Image.Resampling.BILINEAR)
     histogram = rgb.histogram()
@@ -337,6 +348,7 @@ def extract_feature(path: Path) -> PhotoRecord:
     image, width, height, captured_at = _decoded_image(path)
     try:
         dhash = _difference_hash(image)
+        average_hash = _average_hash(image)
         signature = _color_signature(image)
         sharpness, exposure = _quality_metrics(image)
     finally:
@@ -351,6 +363,7 @@ def extract_feature(path: Path) -> PhotoRecord:
         color_signature=signature,
         sharpness=sharpness,
         exposure=exposure,
+        average_hash=average_hash,
         metadata=metadata,
     )
 
@@ -386,10 +399,49 @@ def histogram_intersection(left: Sequence[float], right: Sequence[float]) -> flo
     return sum(min(a, b) for a, b in zip(left, right))
 
 
-def visual_similarity(left: PhotoRecord, right: PhotoRecord) -> float:
-    hash_similarity = 1.0 - hamming_distance(left.dhash, right.dhash) / 64.0
+def visual_similarity(
+    left: PhotoRecord,
+    right: PhotoRecord,
+    *,
+    color_weight: float = 0.22,
+    hash_method: str = "difference",
+) -> float:
+    left_hash = left.average_hash if hash_method == "average" else left.dhash
+    right_hash = right.average_hash if hash_method == "average" else right.dhash
+    hash_similarity = 1.0 - hamming_distance(left_hash, right_hash) / 64.0
     color_similarity = histogram_intersection(left.color_signature, right.color_signature)
-    return max(0.0, min(1.0, hash_similarity * 0.78 + color_similarity * 0.22))
+    color_weight = max(0.0, min(1.0, color_weight))
+    return max(
+        0.0,
+        min(1.0, hash_similarity * (1.0 - color_weight) + color_similarity * color_weight),
+    )
+
+
+def _content_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _union_exact_duplicates(records: Sequence[PhotoRecord], disjoint: "_DisjointSet") -> None:
+    candidates: dict[int, list[int]] = {}
+    for index, photo in enumerate(records):
+        if photo.path.is_file():
+            candidates.setdefault(photo.file_size, []).append(index)
+    for indices in candidates.values():
+        if len(indices) < 2:
+            continue
+        digests: dict[str, int] = {}
+        for index in indices:
+            try:
+                digest = _content_digest(records[index].path)
+            except OSError:
+                continue
+            first = digests.setdefault(digest, index)
+            if first != index:
+                disjoint.union(first, index)
 
 
 class _DisjointSet:
@@ -417,21 +469,43 @@ class _DisjointSet:
 
 def group_similar_photos(
     records: Iterable[PhotoRecord],
-    similarity_threshold: float = 0.84,
-    time_window_seconds: int = 90,
+    options: Optional[AnalysisOptions] = None,
+    *,
+    similarity_threshold: Optional[float] = None,
+    time_window_seconds: Optional[int] = None,
 ) -> list[PhotoGroup]:
+    options = options or AnalysisOptions()
+    threshold = max(0.0, min(1.0, (
+        similarity_threshold
+        if similarity_threshold is not None
+        else options.similarity_threshold
+    )))
+    time_window = (
+        time_window_seconds
+        if time_window_seconds is not None
+        else options.time_window_seconds
+    )
     ordered = sorted(records, key=lambda photo: (photo.captured_at, photo.path.name.lower()))
     disjoint = _DisjointSet(len(ordered))
+    if options.detect_exact_duplicates:
+        _union_exact_duplicates(ordered, disjoint)
     for left_index, left in enumerate(ordered):
         for right_index in range(left_index + 1, len(ordered)):
             right = ordered[right_index]
             time_gap = (right.captured_at - left.captured_at).total_seconds()
-            hash_distance = hamming_distance(left.dhash, right.dhash)
-            if time_gap > time_window_seconds and hash_distance > 6:
-                if time_gap > max(time_window_seconds * 4, 600):
+            left_hash = left.average_hash if options.hash_method == "average" else left.dhash
+            right_hash = right.average_hash if options.hash_method == "average" else right.dhash
+            hash_distance = hamming_distance(left_hash, right_hash)
+            if time_gap > time_window and hash_distance > 6:
+                if time_gap > max(time_window * 4, 600):
                     break
                 continue
-            if visual_similarity(left, right) >= similarity_threshold:
+            if visual_similarity(
+                left,
+                right,
+                color_weight=options.color_weight,
+                hash_method=options.hash_method,
+            ) >= threshold:
                 disjoint.union(left_index, right_index)
 
     buckets: dict[int, list[PhotoRecord]] = {}
@@ -446,5 +520,13 @@ def group_similar_photos(
     for group_id, photos in enumerate(grouped_photos, start=1):
         for photo in photos:
             photo.group_id = group_id
-        groups.append(PhotoGroup(id=group_id, photos=photos))
+        groups.append(
+            PhotoGroup(
+                id=group_id,
+                photos=photos,
+                sharpness_weight=options.sharpness_weight,
+                exposure_weight=options.exposure_weight,
+                resolution_weight=options.resolution_weight,
+            )
+        )
     return groups

@@ -21,7 +21,7 @@ from photo_fit_picker.analysis import (
     hamming_distance,
     visual_similarity,
 )
-from photo_fit_picker.models import PhotoRecord
+from photo_fit_picker.models import AnalysisOptions, PhotoGroup, PhotoRecord
 
 
 def make_photo(name: str, hash_value: int, seconds: int, color: tuple[float, ...]) -> PhotoRecord:
@@ -35,6 +35,7 @@ def make_photo(name: str, hash_value: int, seconds: int, color: tuple[float, ...
         color_signature=color,
         sharpness=0.1,
         exposure=0.5,
+        average_hash=hash_value,
     )
 
 
@@ -212,6 +213,77 @@ class AnalysisTests(unittest.TestCase):
 
         self.assertLess(visual_similarity(left, right), 0.84)
         self.assertEqual(len(group_similar_photos([left, right])), 2)
+
+    def test_average_hash_experiment_changes_grouping_result(self) -> None:
+        neutral = tuple([1 / 48] * 48)
+        left = make_photo("a.jpg", 0xAAAAAAAAAAAAAAAA, 0, neutral)
+        right = make_photo("b.jpg", 0x5555555555555555, 1, neutral)
+        left.average_hash = right.average_hash = 0xF0F0F0F0F0F0F0F0
+
+        difference_groups = group_similar_photos(
+            [left, right],
+            AnalysisOptions(similarity_threshold=0.9, detect_exact_duplicates=False),
+        )
+        average_groups = group_similar_photos(
+            [left, right],
+            AnalysisOptions(
+                similarity_threshold=0.9,
+                hash_method="average",
+                detect_exact_duplicates=False,
+            ),
+        )
+
+        self.assertEqual(len(difference_groups), 2)
+        self.assertEqual(len(average_groups), 1)
+
+    def test_color_weight_changes_similarity_boundary(self) -> None:
+        left = make_photo("a.jpg", 0, 0, tuple([1 / 48] * 48))
+        right = make_photo("b.jpg", 0, 1, tuple([0.0] * 48))
+
+        self.assertGreater(
+            visual_similarity(left, right, color_weight=0.1),
+            visual_similarity(left, right, color_weight=0.5),
+        )
+
+    def test_exact_duplicates_group_across_large_time_gap(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            folder = Path(temporary_directory)
+            first_path = folder / "first.jpg"
+            second_path = folder / "copy.jpg"
+            first_path.write_bytes(b"identical photo bytes")
+            second_path.write_bytes(b"identical photo bytes")
+            neutral = tuple([1 / 48] * 48)
+            first = make_photo(str(first_path), 0, 0, neutral)
+            second = make_photo(str(second_path), (1 << 64) - 1, 86_400, neutral)
+            first.file_size = second.file_size = first_path.stat().st_size
+
+            groups = group_similar_photos(
+                [first, second],
+                AnalysisOptions(similarity_threshold=0.99, time_window_seconds=5),
+            )
+
+        self.assertEqual(len(groups), 1)
+
+    def test_recommendation_weights_can_prefer_resolution(self) -> None:
+        neutral = tuple([1 / 48] * 48)
+        sharp = make_photo("sharp.jpg", 0, 0, neutral)
+        sharp.sharpness = 0.2
+        sharp.width, sharp.height = 1200, 800
+        large = make_photo("large.jpg", 0, 0, neutral)
+        large.sharpness = 0.06
+        large.width, large.height = 6000, 4000
+
+        quality_group = PhotoGroup(id=1, photos=[sharp, large])
+        resolution_group = PhotoGroup(
+            id=1,
+            photos=[sharp, large],
+            sharpness_weight=0,
+            exposure_weight=0,
+            resolution_weight=1,
+        )
+
+        self.assertIs(quality_group.recommended, sharp)
+        self.assertIs(resolution_group.recommended, large)
 
 
 if __name__ == "__main__":
