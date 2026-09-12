@@ -108,6 +108,26 @@ class PhotoRecord:
         return f"{self.width} × {self.height}"
 
     @property
+    def sharpness_label(self) -> str:
+        if self.sharpness >= 0.12:
+            return "清晰"
+        if self.sharpness >= 0.055:
+            return "清晰度尚可"
+        return "可能偏软"
+
+    @property
+    def exposure_label(self) -> str:
+        if self.exposure < 0.24:
+            return "画面偏暗"
+        if self.exposure > 0.78:
+            return "画面偏亮"
+        return "曝光均衡"
+
+    @property
+    def quality_summary(self) -> str:
+        return f"{self.sharpness_label} · {self.exposure_label}"
+
+    @property
     def quality_score(self) -> float:
         exposure_quality = max(0.0, 1.0 - abs(self.exposure - 0.5) * 1.8)
         sharpness_quality = min(1.0, self.sharpness / 0.12)
@@ -129,6 +149,11 @@ class PhotoGroup:
         if not candidates:
             return None
         return max(candidates, key=lambda photo: photo.quality_score)
+
+    def recommendation_reason(self, photo: PhotoRecord) -> str:
+        if photo is self.recommended:
+            return "本组清晰度与曝光综合得分最高"
+        return "可与本组推荐照片对比清晰度和曝光"
 
     @property
     def kept_count(self) -> int:

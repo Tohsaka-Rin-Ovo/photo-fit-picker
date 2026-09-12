@@ -426,11 +426,27 @@ class PhotoCard(QFrame):
         caption_layout.addLayout(title_row)
 
         details = QLabel(
-            f"{photo.width} × {photo.height}  ·  {photo.path.suffix[1:].upper()}"
-            f"  ·  {photo.captured_at:%H:%M:%S}"
+            f"{photo.captured_at:%m月%d日 %H:%M}  ·  {photo.format_label}"
+            f"  ·  {photo.file_size_label}"
         )
         details.setObjectName("photoDetails")
         caption_layout.addWidget(details)
+        secondary_text = photo.dimension_label
+        if photo.metadata.camera_label:
+            secondary_text += f"  ·  {photo.metadata.camera_label}"
+        elif photo.metadata.shooting_summary:
+            secondary_text += f"  ·  {photo.metadata.shooting_summary}"
+        secondary = QLabel()
+        secondary.setObjectName("photoSecondaryDetails")
+        secondary.setText(
+            secondary.fontMetrics().elidedText(
+                secondary_text,
+                Qt.TextElideMode.ElideRight,
+                258,
+            )
+        )
+        secondary.setToolTip(secondary_text)
+        caption_layout.addWidget(secondary)
         layout.addWidget(caption)
 
         self.sync_status()
@@ -579,6 +595,8 @@ class PhotoViewer(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
+        body = QHBoxLayout()
+        body.setSpacing(12)
         self.image_label = QLabel()
         self.image_label.setObjectName("viewerImage")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -587,7 +605,45 @@ class PhotoViewer(QDialog):
             QSizePolicy.Policy.Ignored,
             QSizePolicy.Policy.Expanding,
         )
-        layout.addWidget(self.image_label, 1)
+        body.addWidget(self.image_label, 1)
+
+        inspector_scroll = QScrollArea()
+        inspector_scroll.setObjectName("viewerInspectorScroll")
+        inspector_scroll.setWidgetResizable(True)
+        inspector_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inspector_scroll.setFixedWidth(292)
+        inspector = QWidget()
+        inspector.setObjectName("viewerInspector")
+        inspector_layout = QVBoxLayout(inspector)
+        inspector_layout.setContentsMargins(18, 16, 18, 16)
+        inspector_layout.setSpacing(10)
+        inspector_title = QLabel("照片信息")
+        inspector_title.setObjectName("viewerSectionTitle")
+        inspector_layout.addWidget(inspector_title)
+        self.metadata_grid = QGridLayout()
+        self.metadata_grid.setColumnStretch(1, 1)
+        self.metadata_grid.setHorizontalSpacing(12)
+        self.metadata_grid.setVerticalSpacing(8)
+        inspector_layout.addLayout(self.metadata_grid)
+        divider = QFrame()
+        divider.setObjectName("viewerDivider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        inspector_layout.addWidget(divider)
+        quality_title = QLabel("质量判断")
+        quality_title.setObjectName("viewerSectionTitle")
+        inspector_layout.addWidget(quality_title)
+        self.quality_label = QLabel()
+        self.quality_label.setObjectName("viewerQuality")
+        self.quality_label.setWordWrap(True)
+        inspector_layout.addWidget(self.quality_label)
+        self.reason_label = QLabel()
+        self.reason_label.setObjectName("viewerReason")
+        self.reason_label.setWordWrap(True)
+        inspector_layout.addWidget(self.reason_label)
+        inspector_layout.addStretch()
+        inspector_scroll.setWidget(inspector)
+        body.addWidget(inspector_scroll)
+        layout.addLayout(body, 1)
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
@@ -642,6 +698,67 @@ class PhotoViewer(QDialog):
         self.resize_timer.timeout.connect(self._load_current)
         self._load_current()
 
+    def _metadata_rows(self, photo: PhotoRecord) -> list[tuple[str, str]]:
+        metadata = photo.metadata
+        rows = [
+            ("拍摄时间", photo.captured_at.strftime("%Y年%m月%d日 %H:%M:%S")),
+            ("尺寸", f"{photo.dimension_label}  ·  {photo.megapixels:.1f} MP"),
+            ("文件", f"{photo.format_label}  ·  {photo.file_size_label}"),
+        ]
+        optional_rows = [
+            ("相机", metadata.camera_label),
+            ("镜头", metadata.lens),
+            ("拍摄参数", metadata.shooting_summary),
+            ("曝光补偿", f"{metadata.exposure_bias:+g} EV" if metadata.exposure_bias is not None else ""),
+            ("白平衡", metadata.white_balance),
+            ("对焦", metadata.focus_mode),
+            ("测光", metadata.metering_mode),
+            ("曝光程序", metadata.exposure_program),
+            ("闪光灯", metadata.flash),
+            ("软件", metadata.software),
+            (
+                "位置",
+                f"{metadata.latitude:.5f}, {metadata.longitude:.5f}"
+                if metadata.has_location
+                else "",
+            ),
+        ]
+        rows.extend((label, value) for label, value in optional_rows if value)
+        rows.extend(metadata.details)
+        return rows
+
+    def _populate_inspector(self, photo: PhotoRecord) -> None:
+        while self.metadata_grid.count():
+            item = self.metadata_grid.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        for row, (label_text, value_text) in enumerate(self._metadata_rows(photo)):
+            label = QLabel(label_text)
+            label.setObjectName("viewerMetadataLabel")
+            label.setAlignment(Qt.AlignmentFlag.AlignTop)
+            value = QLabel(value_text)
+            value.setObjectName("viewerMetadataValue")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self.metadata_grid.addWidget(label, row, 0)
+            self.metadata_grid.addWidget(value, row, 1)
+
+        available = [
+            item
+            for item in self.photos
+            if item.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
+        ]
+        recommended = max(available, key=lambda item: item.quality_score) if available else None
+        self.quality_label.setText(
+            f"{photo.quality_summary}\n综合质量 {photo.quality_score * 100:.0f} 分"
+        )
+        self.reason_label.setText(
+            "本组推荐 · 清晰度与曝光综合得分最高"
+            if photo is recommended
+            else "拍摄时间、构图与色彩接近，可与本组推荐照片对比。"
+        )
+
     def _load_current(self) -> None:
         photo = self.photos[self.index]
         target = self.image_label.size()
@@ -664,6 +781,7 @@ class PhotoViewer(QDialog):
         self.info_label.setText(
             f"{self.index + 1} / {len(self.photos)}  ·  {photo.display_name}  ·  {state}"
         )
+        self._populate_inspector(photo)
         self.previous_button.setEnabled(self.index > 0)
         self.next_button.setEnabled(self.index < len(self.photos) - 1)
         movable = photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
@@ -2130,7 +2248,7 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             color: #858b93;
             font-size: 12px;
         }
-        #sourceLabel, #photoDetails, #groupMeta, #emptyHint, #summaryLabel,
+        #sourceLabel, #photoDetails, #photoSecondaryDetails, #groupMeta, #emptyHint, #summaryLabel,
         #viewerInfo {
             color: #999fa7;
         }
@@ -2364,6 +2482,10 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
         #photoName {
             color: #eff1f2;
             font-weight: 600;
+        }
+        #photoSecondaryDetails {
+            color: #747b83;
+            font-size: 12px;
         }
         #recommendBadge {
             color: #29200f;
@@ -2646,6 +2768,39 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
         }
         QDialog#photoViewer #viewerInfo {
             color: #d8dcdf;
+        }
+        QDialog#photoViewer #viewerInspectorScroll,
+        QDialog#photoViewer #viewerInspector {
+            background: #1b1d20;
+        }
+        QDialog#photoViewer #viewerInspector {
+            border: 1px solid #2d3136;
+            border-radius: 6px;
+        }
+        QDialog#photoViewer #viewerSectionTitle {
+            color: #f1f2f3;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        QDialog#photoViewer #viewerMetadataLabel {
+            color: #777e86;
+            font-size: 12px;
+        }
+        QDialog#photoViewer #viewerMetadataValue {
+            color: #d5d8db;
+            font-size: 12px;
+        }
+        QDialog#photoViewer #viewerDivider {
+            max-height: 1px;
+            background: #30343a;
+            border: 0;
+        }
+        QDialog#photoViewer #viewerQuality {
+            color: #dceee4;
+        }
+        QDialog#photoViewer #viewerReason {
+            color: #8e969e;
+            font-size: 12px;
         }
         QDialog#photoViewer QPushButton, QDialog#photoViewer QToolButton {
             color: #e6e8ea;

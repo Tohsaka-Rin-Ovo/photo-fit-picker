@@ -182,6 +182,17 @@ class AnalysisTests(unittest.TestCase):
     def test_hamming_distance(self) -> None:
         self.assertEqual(hamming_distance(0b1010, 0b0011), 2)
 
+    def test_photo_display_labels_explain_quality(self) -> None:
+        photo = make_photo("DSC_0042.nef", 0, 0, tuple([1 / 48] * 48))
+        photo.file_size = 12_582_912
+        photo.sharpness = 0.13
+        photo.exposure = 0.5
+
+        self.assertEqual(photo.format_label, "NEF")
+        self.assertEqual(photo.file_size_label, "12.0 MB")
+        self.assertEqual(photo.dimension_label, "4000 × 3000")
+        self.assertEqual(photo.quality_summary, "清晰 · 曝光均衡")
+
     def test_similar_burst_photos_are_grouped(self) -> None:
         neutral = tuple([1 / 48] * 48)
         photos = [
