@@ -83,13 +83,16 @@ jobs:
           }
       - name: Create Windows installer
         shell: pwsh
-        env:
-          APP_VERSION: ${{ github.ref_name }}
         run: |
-          $env:APP_VERSION = $env:APP_VERSION -replace '^v', ''
-          if ($env:APP_VERSION -notmatch '^\d+\.\d+\.\d+') {
-            $env:APP_VERSION = '0.1.2-dev'
+          $projectMetadata = Get-Content pyproject.toml -Raw
+          $versionMatch = [regex]::Match(
+            $projectMetadata,
+            '(?m)^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"\s*$'
+          )
+          if (-not $versionMatch.Success) {
+            throw "Could not read the application version from pyproject.toml"
           }
+          $env:APP_VERSION = $versionMatch.Groups['version'].Value
           New-Item -ItemType Directory -Force -Path dist/release
           $compiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $compiler)) {
