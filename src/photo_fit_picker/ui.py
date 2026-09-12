@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRectF,
     QSize,
+    QSettings,
     QStandardPaths,
     Qt,
     QThread,
@@ -66,6 +67,7 @@ from PySide6.QtWidgets import (
 )
 from PIL import Image
 
+from . import __version__
 from .analysis import SUPPORTED_EXTENSIONS, discover_images, load_display_image
 from .fileops import move_photo_to_trash, move_photos, move_selected, undo_last_move
 from .models import PhotoGroup, PhotoRecord, ReviewStatus
@@ -90,6 +92,17 @@ def _icon(
         color_active=active or color,
         color_disabled=ICON_MUTED,
     )
+
+
+def _setting_bool(settings: QSettings, key: str, default: bool = False) -> bool:
+    value = settings.value(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
+def _reduced_motion() -> bool:
+    return _setting_bool(QSettings(), "appearance/reduce_motion")
 
 
 def _read_preview(path: Path, target: QSize) -> QImage:
@@ -173,6 +186,9 @@ class _RippleFeedback:
         self.animation.valueChanged.connect(self._update)
 
     def start(self, origin: QPointF) -> None:
+        if _reduced_motion():
+            self.progress = 1.0
+            return
         self.origin = origin
         self.animation.stop()
         self.animation.start()
@@ -277,6 +293,24 @@ class SelectionCheckBox(QCheckBox):
             painter.drawPath(check)
 
 
+class SettingsSwitch(QCheckBox):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(42, 24)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = QRectF(1, 2, 40, 20)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#4f9f78") if self.isChecked() else QColor("#3a3e43"))
+        painter.drawRoundedRect(track, 10, 10)
+        knob_x = 21 if self.isChecked() else 3
+        painter.setBrush(QColor("#f3f5f4"))
+        painter.drawEllipse(QRectF(knob_x, 4, 16, 16))
+
+
 class PhotoCard(QFrame):
     status_changed = Signal()
     selection_changed = Signal()
@@ -334,11 +368,11 @@ class PhotoCard(QFrame):
             badge.move(10, 10)
             badge.raise_()
 
-        action_panel = QFrame(preview_frame)
-        action_panel.setObjectName("cardActions")
-        action_panel.setFixedSize(76, 36)
-        action_panel.move(200, 144)
-        action_layout = QHBoxLayout(action_panel)
+        self.action_panel = QFrame(preview_frame)
+        self.action_panel.setObjectName("cardActions")
+        self.action_panel.setFixedSize(76, 36)
+        self.action_panel.move(200, 144)
+        action_layout = QHBoxLayout(self.action_panel)
         action_layout.setContentsMargins(2, 2, 2, 2)
         action_layout.setSpacing(4)
 
@@ -360,7 +394,8 @@ class PhotoCard(QFrame):
         self.reject_button.clicked.connect(lambda: self._set_status(ReviewStatus.REJECTED))
         action_layout.addWidget(self.reject_button)
         action_layout.addWidget(self.keep_button)
-        action_panel.raise_()
+        self.action_panel.raise_()
+        self.action_panel.hide()
 
         caption = QFrame()
         caption.setObjectName("photoCaption")
@@ -435,6 +470,8 @@ class PhotoCard(QFrame):
         self.style().polish(self)
 
     def animate_in(self, delay_ms: int) -> None:
+        if _reduced_motion():
+            return
         effect = QGraphicsOpacityEffect(self)
         effect.setOpacity(0.0)
         self.setGraphicsEffect(effect)
@@ -455,6 +492,15 @@ class PhotoCard(QFrame):
         effect = self.graphicsEffect()
         if effect:
             effect.setEnabled(False)
+
+    def enterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self.photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+            self.action_panel.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        self.action_panel.hide()
+        super().leaveEvent(event)
 
     def sync_status(self) -> None:
         self.keep_button.setChecked(self.photo.status == ReviewStatus.KEPT)
@@ -479,6 +525,7 @@ class PhotoCard(QFrame):
             ReviewStatus.TRASHED: "回收站",
         }[self.photo.status]
         self.status_label.setText(status_text)
+        self.status_label.setVisible(self.photo.status != ReviewStatus.PENDING)
         self.status_label.setProperty("reviewStatus", self.photo.status.value)
         self.status_label.style().unpolish(self.status_label)
         self.status_label.style().polish(self.status_label)
@@ -652,6 +699,306 @@ class PhotoViewer(QDialog):
             self.resize_timer.start()
 
 
+class SettingsDialog(QDialog):
+    def __init__(
+        self,
+        source_folder: Optional[Path],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.preferences = QSettings()
+        self.source_folder = source_folder
+        self.requested_action: Optional[str] = None
+        self.setObjectName("settingsDialog")
+        self.setWindowTitle("拾影设置")
+        self.setModal(True)
+        self.resize(760, 510)
+        self.setMinimumSize(680, 460)
+
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("settingsSidebar")
+        sidebar.setFixedWidth(168)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(14, 22, 14, 16)
+        sidebar_layout.setSpacing(12)
+
+        title = QLabel("设置")
+        title.setObjectName("settingsNavTitle")
+        sidebar_layout.addWidget(title)
+
+        self.navigation = QListWidget()
+        self.navigation.setObjectName("settingsNav")
+        for text, icon_name in (
+            ("外观", "palette-outline"),
+            ("文件夹", "folder-outline"),
+            ("筛选", "tune-variant"),
+        ):
+            self.navigation.addItem(QListWidgetItem(_icon(icon_name), text))
+        sidebar_layout.addWidget(self.navigation)
+        sidebar_layout.addStretch()
+        version = QLabel(f"拾影 {__version__}")
+        version.setObjectName("settingsVersion")
+        sidebar_layout.addWidget(version)
+        root_layout.addWidget(sidebar)
+
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("settingsPages")
+        self.pages.addWidget(self._build_appearance_page())
+        self.pages.addWidget(self._build_folder_page())
+        self.pages.addWidget(self._build_review_page())
+        root_layout.addWidget(self.pages, 1)
+
+        self.navigation.currentRowChanged.connect(self.pages.setCurrentIndex)
+        self.navigation.setCurrentRow(0)
+
+    def _page(self, title: str) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(30, 28, 30, 24)
+        layout.setSpacing(18)
+        heading = QLabel(title)
+        heading.setObjectName("settingsTitle")
+        layout.addWidget(heading)
+        return page, layout
+
+    def _group(self) -> tuple[QFrame, QVBoxLayout]:
+        group = QFrame()
+        group.setObjectName("settingsGroup")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(16, 13, 16, 13)
+        layout.setSpacing(12)
+        return group, layout
+
+    def _text_block(self, title: str, hint: str = "") -> QWidget:
+        block = QWidget()
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        label = QLabel(title)
+        label.setObjectName("settingsRowTitle")
+        layout.addWidget(label)
+        if hint:
+            description = QLabel(hint)
+            description.setObjectName("settingsRowHint")
+            description.setWordWrap(True)
+            layout.addWidget(description)
+        return block
+
+    def _divider(self) -> QFrame:
+        divider = QFrame()
+        divider.setObjectName("settingsDivider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        return divider
+
+    def _build_appearance_page(self) -> QWidget:
+        page, layout = self._page("外观")
+        group, group_layout = self._group()
+
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(
+            self._text_block("界面主题"),
+            1,
+        )
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("石墨深色", "graphite")
+        self.theme_combo.addItem("沉浸黑", "black")
+        saved_theme = str(self.preferences.value("appearance/theme", "graphite"))
+        self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(saved_theme)))
+        self.theme_combo.currentIndexChanged.connect(self._theme_changed)
+        theme_row.addWidget(self.theme_combo)
+        group_layout.addLayout(theme_row)
+        group_layout.addWidget(self._divider())
+
+        motion_row = QHBoxLayout()
+        motion_row.addWidget(
+            self._text_block("减少动画"),
+            1,
+        )
+        self.motion_toggle = SettingsSwitch()
+        self.motion_toggle.setObjectName("settingsSwitch")
+        self.motion_toggle.setChecked(
+            _setting_bool(self.preferences, "appearance/reduce_motion")
+        )
+        self.motion_toggle.toggled.connect(
+            lambda checked: self.preferences.setValue(
+                "appearance/reduce_motion",
+                checked,
+            )
+        )
+        motion_row.addWidget(self.motion_toggle)
+        group_layout.addLayout(motion_row)
+        layout.addWidget(group)
+        layout.addStretch()
+        return page
+
+    def _build_folder_page(self) -> QWidget:
+        page, layout = self._page("文件夹")
+        source_group, source_layout = self._group()
+        source_row = QHBoxLayout()
+        source_name = str(self.source_folder) if self.source_folder else "尚未选择"
+        source_row.addWidget(
+            self._text_block("当前照片文件夹", source_name),
+            1,
+        )
+        change_source = FeedbackButton("更换")
+        change_source.setObjectName("settingsActionButton")
+        change_source.clicked.connect(lambda: self._finish("source"))
+        source_row.addWidget(change_source)
+        source_layout.addLayout(source_row)
+        layout.addWidget(source_group)
+
+        destination_group, destination_layout = self._group()
+        destination_row = QHBoxLayout()
+        destination_row.addWidget(
+            self._text_block("默认目标位置"),
+            1,
+        )
+        self.destination_mode = QComboBox()
+        self.destination_mode.addItem("照片文件夹内 / 已筛选", "source")
+        self.destination_mode.addItem("固定文件夹", "custom")
+        saved_mode = str(
+            self.preferences.value("folders/destination_mode", "source")
+        )
+        self.destination_mode.setCurrentIndex(
+            max(0, self.destination_mode.findData(saved_mode))
+        )
+        self.destination_mode.currentIndexChanged.connect(self._destination_mode_changed)
+        destination_row.addWidget(self.destination_mode)
+        destination_layout.addLayout(destination_row)
+        self.custom_destination_divider = self._divider()
+        destination_layout.addWidget(self.custom_destination_divider)
+
+        custom_row = QHBoxLayout()
+        custom_path = str(self.preferences.value("folders/custom_destination", ""))
+        self.destination_path = QLabel(custom_path or "未设置固定文件夹")
+        self.destination_path.setObjectName("settingsPath")
+        self.destination_path.setWordWrap(True)
+        custom_row.addWidget(self.destination_path, 1)
+        self.choose_destination = FeedbackButton("选择…")
+        self.choose_destination.setObjectName("settingsActionButton")
+        self.choose_destination.clicked.connect(self._choose_custom_destination)
+        custom_row.addWidget(self.choose_destination)
+        destination_layout.addLayout(custom_row)
+        layout.addWidget(destination_group)
+
+        safety_group, safety_layout = self._group()
+        safety_row = QHBoxLayout()
+        safety_icon = QLabel()
+        safety_icon.setPixmap(_icon("shield-check-outline", ICON_ACCENT).pixmap(20, 20))
+        safety_row.addWidget(safety_icon)
+        safety_row.addWidget(
+            self._text_block(
+                "照片安全",
+                "应用不会自动删除照片；手动删除只进入系统回收站，"
+                "并始终二次确认。",
+            ),
+            1,
+        )
+        safety_layout.addLayout(safety_row)
+        layout.addWidget(safety_group)
+        layout.addStretch()
+        self._sync_destination_controls()
+        return page
+
+    def _build_review_page(self) -> QWidget:
+        page, layout = self._page("筛选")
+        group, group_layout = self._group()
+
+        similarity_row = QHBoxLayout()
+        similarity_row.addWidget(
+            self._text_block("相似度"),
+            1,
+        )
+        self.similarity_value = QLabel()
+        self.similarity_value.setObjectName("settingsValue")
+        similarity_row.addWidget(self.similarity_value)
+        group_layout.addLayout(similarity_row)
+        self.similarity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.similarity_slider.setRange(70, 95)
+        self.similarity_slider.setValue(
+            int(self.preferences.value("review/similarity", 84))
+        )
+        self.similarity_value.setText(f"{self.similarity_slider.value()}%")
+        self.similarity_slider.valueChanged.connect(self._similarity_changed)
+        group_layout.addWidget(self.similarity_slider)
+        group_layout.addWidget(self._divider())
+
+        time_row = QHBoxLayout()
+        time_row.addWidget(
+            self._text_block("连拍时间范围"),
+            1,
+        )
+        self.time_window = QSpinBox()
+        self.time_window.setRange(5, 600)
+        self.time_window.setValue(
+            int(self.preferences.value("review/time_window", 90))
+        )
+        self.time_window.setSuffix(" 秒")
+        self.time_window.valueChanged.connect(
+            lambda value: self.preferences.setValue("review/time_window", value)
+        )
+        time_row.addWidget(self.time_window)
+        group_layout.addLayout(time_row)
+        layout.addWidget(group)
+
+        reanalyze = FeedbackButton("按当前设置重新分析")
+        reanalyze.setObjectName("primaryButton")
+        reanalyze.setIcon(_icon("magnify", "#173325"))
+        thread = getattr(self.parent(), "analysis_thread", None)
+        reanalyze.setEnabled(
+            self.source_folder is not None
+            and not (thread is not None and thread.isRunning())
+        )
+        reanalyze.clicked.connect(lambda: self._finish("reanalyze"))
+        layout.addWidget(reanalyze, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
+        return page
+
+    def _theme_changed(self) -> None:
+        theme = str(self.theme_combo.currentData())
+        self.preferences.setValue("appearance/theme", theme)
+        instance = QApplication.instance()
+        if isinstance(instance, QApplication):
+            apply_theme(instance, theme)
+
+    def _similarity_changed(self, value: int) -> None:
+        self.similarity_value.setText(f"{value}%")
+        self.preferences.setValue("review/similarity", value)
+
+    def _destination_mode_changed(self) -> None:
+        self.preferences.setValue(
+            "folders/destination_mode",
+            self.destination_mode.currentData(),
+        )
+        self._sync_destination_controls()
+
+    def _sync_destination_controls(self) -> None:
+        is_custom = self.destination_mode.currentData() == "custom"
+        self.custom_destination_divider.setVisible(is_custom)
+        self.destination_path.setVisible(is_custom)
+        self.choose_destination.setVisible(is_custom)
+
+    def _choose_custom_destination(self) -> None:
+        current = str(self.preferences.value("folders/custom_destination", ""))
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择保留照片的默认文件夹",
+            current or str(Path.home()),
+        )
+        if selected:
+            self.preferences.setValue("folders/custom_destination", selected)
+            self.destination_path.setText(selected)
+
+    def _finish(self, action: str) -> None:
+        self.requested_action = action
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -660,8 +1007,13 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(920, 640)
         self.setAcceptDrops(True)
 
+        self.preferences = QSettings()
         self.source_folder: Optional[Path] = None
         self.destination_folder: Optional[Path] = None
+        self.similarity_threshold = 84
+        self.time_window_seconds = 90
+        self.destination_mode = "source"
+        self._load_preferences()
         self.groups: list[PhotoGroup] = []
         self.visible_groups: list[PhotoGroup] = []
         self.cards: list[PhotoCard] = []
@@ -717,14 +1069,6 @@ class MainWindow(QMainWindow):
         self.undo_button.clicked.connect(self._undo_move)
         header_layout.addWidget(self.undo_button)
 
-        self.destination_button = FeedbackToolButton()
-        self.destination_button.setObjectName("headerIconButton")
-        self.destination_button.setIcon(_icon("folder-outline"))
-        self.destination_button.setIconSize(QSize(19, 19))
-        self.destination_button.setToolTip("设置已筛选照片的目标文件夹")
-        self.destination_button.setAccessibleName("设置已筛选照片的目标文件夹")
-        self.destination_button.clicked.connect(self._choose_destination)
-        header_layout.addWidget(self.destination_button)
         self.move_button = FeedbackButton("移动保留项")
         self.move_button.setIcon(_icon("export-variant", "#173325"))
         self.move_button.setIconSize(QSize(18, 18))
@@ -749,21 +1093,50 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.progress)
         self.setStatusBar(status)
 
+    def _load_preferences(self) -> None:
+        self.similarity_threshold = max(
+            70,
+            min(95, int(self.preferences.value("review/similarity", 84))),
+        )
+        self.time_window_seconds = max(
+            5,
+            min(600, int(self.preferences.value("review/time_window", 90))),
+        )
+        self.destination_mode = str(
+            self.preferences.value("folders/destination_mode", "source")
+        )
+        custom_destination = str(
+            self.preferences.value("folders/custom_destination", "")
+        )
+        if self.destination_mode == "custom":
+            self.destination_folder = (
+                Path(custom_destination) if custom_destination else None
+            )
+        elif self.source_folder:
+            self.destination_folder = self.source_folder / "已筛选"
+        else:
+            self.destination_folder = None
+
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setMinimumWidth(220)
-        sidebar.setMaximumWidth(260)
+        sidebar.setMinimumWidth(212)
+        sidebar.setMaximumWidth(248)
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(14, 16, 14, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 14, 12, 12)
+        layout.setSpacing(10)
 
-        folder_button = FeedbackButton("更换照片文件夹")
-        folder_button.setObjectName("sidebarButton")
-        folder_button.setIcon(_icon("folder-open-outline"))
-        folder_button.setIconSize(QSize(18, 18))
-        folder_button.clicked.connect(self._choose_source)
-        layout.addWidget(folder_button)
+        self.folder_button = FeedbackButton("照片文件夹")
+        self.folder_button.setObjectName("sidebarButton")
+        self.folder_button.setIcon(_icon("folder-open-outline"))
+        self.folder_button.setIconSize(QSize(18, 18))
+        self.folder_button.clicked.connect(self._choose_source)
+        layout.addWidget(self.folder_button)
+
+        self.sidebar_review_panel = QWidget()
+        review_layout = QVBoxLayout(self.sidebar_review_panel)
+        review_layout.setContentsMargins(0, 0, 0, 0)
+        review_layout.setSpacing(10)
 
         progress_header = QHBoxLayout()
         progress_title = QLabel("审片进度")
@@ -773,86 +1146,43 @@ class MainWindow(QMainWindow):
         self.progress_count = QLabel("0 / 0")
         self.progress_count.setObjectName("progressCount")
         progress_header.addWidget(self.progress_count)
-        layout.addLayout(progress_header)
+        review_layout.addLayout(progress_header)
 
         self.review_progress = QProgressBar()
         self.review_progress.setObjectName("reviewProgress")
         self.review_progress.setTextVisible(False)
         self.review_progress.setRange(0, 1)
         self.review_progress.setValue(0)
-        layout.addWidget(self.review_progress)
+        review_layout.addWidget(self.review_progress)
 
         filter_title = QLabel("照片组")
         filter_title.setObjectName("sectionTitle")
-        layout.addWidget(filter_title)
+        review_layout.addWidget(filter_title)
         self.group_filter = QComboBox()
         self.group_filter.addItem("全部照片组", "all")
         self.group_filter.addItem("只看待审核", "pending")
         self.group_filter.addItem("已有保留", "kept")
         self.group_filter.addItem("相似组", "similar")
         self.group_filter.currentIndexChanged.connect(self._apply_group_filter)
-        layout.addWidget(self.group_filter)
+        review_layout.addWidget(self.group_filter)
 
         self.group_list = QListWidget()
         self.group_list.currentRowChanged.connect(self._show_group_at_row)
-        layout.addWidget(self.group_list, 1)
+        review_layout.addWidget(self.group_list, 1)
 
         self.summary_label = QLabel("尚未分析照片")
         self.summary_label.setObjectName("summaryLabel")
         self.summary_label.setWordWrap(True)
-        layout.addWidget(self.summary_label)
+        review_layout.addWidget(self.summary_label)
+        layout.addWidget(self.sidebar_review_panel, 100)
+        layout.addStretch(1)
 
-        self.settings_toggle = FeedbackToolButton()
-        self.settings_toggle.setText("分析参数")
-        self.settings_toggle.setObjectName("disclosureButton")
-        self.settings_toggle.setIcon(_icon("tune-variant", ICON_MUTED))
-        self.settings_toggle.setIconSize(QSize(17, 17))
-        self.settings_toggle.setCheckable(True)
-        self.settings_toggle.setToolButtonStyle(
-            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
-        )
-        self.settings_toggle.toggled.connect(self._toggle_analysis_settings)
-        layout.addWidget(self.settings_toggle)
-
-        self.settings_panel = QFrame()
-        self.settings_panel.setObjectName("settingsPanel")
-        settings_layout = QVBoxLayout(self.settings_panel)
-        settings_layout.setContentsMargins(12, 10, 12, 12)
-        settings_layout.setSpacing(8)
-
-        similarity_row = QHBoxLayout()
-        similarity_row.addWidget(QLabel("相似度"))
-        self.similarity_value = QLabel("84%")
-        similarity_row.addStretch()
-        similarity_row.addWidget(self.similarity_value)
-        settings_layout.addLayout(similarity_row)
-        self.similarity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.similarity_slider.setRange(70, 95)
-        self.similarity_slider.setValue(84)
-        self.similarity_slider.valueChanged.connect(
-            lambda value: self.similarity_value.setText(f"{value}%")
-        )
-        settings_layout.addWidget(self.similarity_slider)
-
-        time_row = QHBoxLayout()
-        time_row.addWidget(QLabel("连拍时间范围"))
-        self.time_window = QSpinBox()
-        self.time_window.setRange(5, 600)
-        self.time_window.setValue(90)
-        self.time_window.setSuffix(" 秒")
-        time_row.addStretch()
-        time_row.addWidget(self.time_window)
-        settings_layout.addLayout(time_row)
-
-        self.analyze_button = FeedbackButton("按当前设置重新分析")
-        self.analyze_button.setIcon(_icon("magnify", "#173325"))
-        self.analyze_button.setIconSize(QSize(17, 17))
-        self.analyze_button.setObjectName("primaryButton")
-        self.analyze_button.setEnabled(False)
-        self.analyze_button.clicked.connect(self._start_analysis)
-        settings_layout.addWidget(self.analyze_button)
-        self.settings_panel.hide()
-        layout.addWidget(self.settings_panel)
+        self.settings_button = FeedbackButton("设置")
+        self.settings_button.setObjectName("settingsButton")
+        self.settings_button.setIcon(_icon("cog-outline", ICON_MUTED))
+        self.settings_button.setIconSize(QSize(18, 18))
+        self.settings_button.clicked.connect(self._open_settings)
+        layout.addWidget(self.settings_button)
         return sidebar
 
     def _build_content(self) -> QWidget:
@@ -1032,20 +1362,37 @@ class MainWindow(QMainWindow):
         self.addAction(clear_action)
 
     def _show_empty_state(self) -> None:
-        self.sidebar.hide()
+        self.sidebar.show()
+        self.folder_button.hide()
+        self.sidebar_review_panel.hide()
         self.undo_button.hide()
-        self.destination_button.hide()
         self.move_button.hide()
         self.content_stack.setCurrentIndex(0)
         self.move_button.setText("移动保留项")
         self.move_button.setEnabled(False)
         self.undo_button.setEnabled(False)
 
-    def _toggle_analysis_settings(self, expanded: bool) -> None:
-        self.settings_panel.setVisible(expanded)
-        self.settings_toggle.setIcon(
-            _icon("tune-variant", ICON_ACCENT if expanded else ICON_MUTED)
-        )
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(self.source_folder, self)
+        dialog.exec()
+        self._load_preferences()
+        self._update_destination_ui()
+        if dialog.requested_action == "source":
+            self._choose_source()
+        elif dialog.requested_action == "reanalyze":
+            self._start_analysis()
+
+    def _update_destination_ui(self) -> None:
+        if self.destination_folder:
+            self.move_button.setToolTip(
+                f"将保留照片移动到：{self.destination_folder}"
+            )
+            self.settings_button.setToolTip(
+                f"设置 · 当前目标：{self.destination_folder}"
+            )
+        else:
+            self.move_button.setToolTip("移动前选择保留照片的目标文件夹")
+            self.settings_button.setToolTip("设置")
 
     def _choose_source(self) -> None:
         selected = QFileDialog.getExistingDirectory(self, "选择照片文件夹")
@@ -1070,10 +1417,18 @@ class MainWindow(QMainWindow):
         self.source_folder = folder
         self.source_label.setText(folder.name)
         self.source_label.setToolTip(str(folder))
-        self.analyze_button.setEnabled(True)
-        if self.destination_folder is None:
+        self.folder_button.setText(
+            self.folder_button.fontMetrics().elidedText(
+                folder.name,
+                Qt.TextElideMode.ElideMiddle,
+                150,
+            )
+        )
+        self.folder_button.setToolTip(str(folder))
+        self.folder_button.show()
+        if self.destination_mode == "source":
             self.destination_folder = folder / "已筛选"
-            self.destination_button.setToolTip(f"目标文件夹：{self.destination_folder}")
+        self._update_destination_ui()
         self.statusBar().showMessage("已选择照片文件夹，正在准备分析", 5000)
 
     def _choose_destination(self) -> None:
@@ -1085,7 +1440,10 @@ class MainWindow(QMainWindow):
         )
         if selected:
             self.destination_folder = Path(selected)
-            self.destination_button.setToolTip(f"目标文件夹：{selected}")
+            self.destination_mode = "custom"
+            self.preferences.setValue("folders/destination_mode", "custom")
+            self.preferences.setValue("folders/custom_destination", selected)
+            self._update_destination_ui()
             self.undo_button.setEnabled(True)
             self.statusBar().showMessage(f"已筛选照片将移动到：{selected}", 5000)
 
@@ -1104,10 +1462,6 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.analyze_button.setEnabled(False)
-        self.analyze_button.setText("正在分析")
-        self.similarity_slider.setEnabled(False)
-        self.time_window.setEnabled(False)
         self.progress.setRange(0, len(paths))
         self.progress.setValue(0)
         self.progress.show()
@@ -1116,8 +1470,8 @@ class MainWindow(QMainWindow):
         thread = QThread(self)
         worker = AnalysisWorker(
             paths,
-            self.similarity_slider.value() / 100.0,
-            self.time_window.value(),
+            self.similarity_threshold / 100.0,
+            self.time_window_seconds,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1140,7 +1494,6 @@ class MainWindow(QMainWindow):
     def _analysis_progress(self, current: int, total: int, filename: str) -> None:
         self.progress.setMaximum(total)
         self.progress.setValue(current)
-        self.analyze_button.setText(f"分析中 {current}/{total}")
         self.statusBar().showMessage(f"正在分析 {current}/{total}：{filename}")
 
     def _analysis_finished(
@@ -1180,10 +1533,6 @@ class MainWindow(QMainWindow):
 
     def _analysis_thread_finished(self) -> None:
         self.progress.hide()
-        self.analyze_button.setText("按当前设置重新分析")
-        self.analyze_button.setEnabled(self.source_folder is not None)
-        self.similarity_slider.setEnabled(True)
-        self.time_window.setEnabled(True)
         self.analysis_thread = None
         self.analysis_worker = None
 
@@ -1208,15 +1557,17 @@ class MainWindow(QMainWindow):
 
         if self.visible_groups:
             self.sidebar.show()
+            self.folder_button.show()
+            self.sidebar_review_panel.show()
             self.undo_button.show()
-            self.destination_button.show()
             self.move_button.show()
             self.content_stack.setCurrentIndex(1)
             self.group_list.setCurrentRow(0)
         elif self.groups:
             self.sidebar.show()
+            self.folder_button.show()
+            self.sidebar_review_panel.show()
             self.undo_button.show()
-            self.destination_button.show()
             self.move_button.show()
             self.content_stack.setCurrentIndex(1)
             self._clear_grid()
@@ -1228,11 +1579,9 @@ class MainWindow(QMainWindow):
         self._update_summary()
 
     def _group_label(self, group: PhotoGroup) -> str:
-        marker = "✓" if group.reviewed else "·"
-        return (
-            f"{marker}   {group.id:02d}   {len(group.photos)} 张"
-            f"  ·  保留 {group.kept_count}"
-        )
+        marker = "✓   " if group.reviewed else ""
+        kept = f"  ·  保留 {group.kept_count}" if group.kept_count else ""
+        return f"{marker}{group.id:02d}   {len(group.photos)} 张{kept}"
 
     def _show_group_at_row(self, row: int) -> None:
         if row < 0 or row >= len(self.visible_groups):
@@ -1493,7 +1842,7 @@ class MainWindow(QMainWindow):
             self._selection_changed()
             return
         self.destination_folder = destination_path
-        self.destination_button.setToolTip(f"目标文件夹：{destination_path}")
+        self._update_destination_ui()
         self.statusBar().showMessage(f"已移动 {len(moved)} 张照片", 8000)
         for card in self.cards:
             card.sync_status()
@@ -1619,10 +1968,10 @@ class MainWindow(QMainWindow):
             self.grid_resize_timer.start()
 
 
-def apply_theme(app: QApplication) -> None:
+def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
     app.setStyle("Fusion")
-    app.setStyleSheet(
-        """
+    mode = theme_mode or str(QSettings().value("appearance/theme", "graphite"))
+    stylesheet = """
         QWidget {
             color: #f2f3f4;
             font-family: "PingFang SC", "Segoe UI", "Microsoft YaHei";
@@ -1657,6 +2006,19 @@ def apply_theme(app: QApplication) -> None:
         #sidebar {
             background: #181a1d;
             border-right: 1px solid #2c3035;
+        }
+        #settingsButton {
+            min-height: 38px;
+            padding-left: 8px;
+            text-align: left;
+            color: #aeb3b9;
+            background: transparent;
+            border-color: transparent;
+        }
+        #settingsButton:hover {
+            color: #f2f3f4;
+            background: #25282c;
+            border-color: transparent;
         }
         #sectionTitle {
             color: #858b93;
@@ -1750,10 +2112,12 @@ def apply_theme(app: QApplication) -> None:
         }
         #sidebarButton {
             text-align: left;
-            background: #222529;
+            background: transparent;
+            border-color: transparent;
         }
         #sidebarButton:hover {
-            background: #292d32;
+            background: #25282c;
+            border-color: transparent;
         }
         #emptyPrimaryButton {
             min-width: 168px;
@@ -2005,6 +2369,82 @@ def apply_theme(app: QApplication) -> None:
             color: #ffffff;
             background: #343a40;
         }
+        QDialog#settingsDialog, #settingsPages, #settingsPage {
+            background: #15171a;
+        }
+        #settingsSidebar {
+            background: #1b1d20;
+            border-right: 1px solid #30343a;
+        }
+        #settingsNavTitle {
+            padding-left: 8px;
+            color: #f2f3f4;
+            font-size: 20px;
+            font-weight: 600;
+        }
+        #settingsNav {
+            background: transparent;
+            border: 0;
+        }
+        #settingsNav::item {
+            min-height: 38px;
+            padding: 0 9px;
+            color: #b8bdc3;
+            border-radius: 6px;
+        }
+        #settingsNav::item:hover {
+            color: #f2f3f4;
+            background: #25282c;
+        }
+        #settingsNav::item:selected {
+            color: #f7f8f9;
+            background: #34383d;
+        }
+        #settingsVersion {
+            padding-left: 8px;
+            color: #666c73;
+            font-size: 11px;
+        }
+        #settingsTitle {
+            color: #f5f6f7;
+            font-size: 22px;
+            font-weight: 600;
+        }
+        #settingsSubtitle, #settingsRowHint {
+            color: #8e949b;
+        }
+        #settingsRowHint {
+            font-size: 12px;
+        }
+        #settingsRowTitle {
+            color: #e7e9eb;
+            font-weight: 500;
+        }
+        #settingsGroup {
+            background: #202327;
+            border: 1px solid #30343a;
+            border-radius: 8px;
+        }
+        #settingsDivider {
+            max-height: 1px;
+            background: #30343a;
+            border: 0;
+        }
+        #settingsPath {
+            color: #aeb3b9;
+            font-size: 12px;
+        }
+        #settingsValue {
+            min-width: 44px;
+            color: #b8f2d0;
+            font-weight: 600;
+        }
+        #settingsActionButton {
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0 11px;
+            background: #2a2e32;
+        }
         QSplitter::handle {
             width: 1px;
             background: #2c3035;
@@ -2070,4 +2510,21 @@ def apply_theme(app: QApplication) -> None:
             border-color: #77444c;
         }
         """
-    )
+    if mode == "black":
+        stylesheet += """
+            QMainWindow, #appRoot, QStackedWidget, #emptyState,
+            #reviewWorkspace, QScrollArea, #photo_grid_host,
+            QDialog#settingsDialog, #settingsPages, #settingsPage {
+                background: #08090a;
+            }
+            #header, QStatusBar {
+                background: #101113;
+            }
+            #sidebar, #settingsSidebar {
+                background: #111315;
+            }
+            #photoCard, #settingsGroup {
+                background: #181a1d;
+            }
+        """
+    app.setStyleSheet(stylesheet)
