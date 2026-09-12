@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "photo-fit-picker"
-version = "0.2.0"
+version = "0.3.0"
 description = "A local-first desktop app for grouping and reviewing similar photos."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -12,6 +12,7 @@ dependencies = [
     "Pillow>=10.0,<13",
     "PySide6-Essentials>=6.6,<7",
     "pillow-heif>=0.16,<1",
+    "qtawesome>=1.4,<2",
     "rawpy>=0.19,<1",
 ]
 
