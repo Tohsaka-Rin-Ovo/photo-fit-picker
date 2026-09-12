@@ -2,8 +2,14 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
-from photo_fit_picker.fileops import move_selected, read_history, undo_last_move
+from photo_fit_picker.fileops import (
+    move_photo_to_trash,
+    move_selected,
+    read_history,
+    undo_last_move,
+)
 from photo_fit_picker.models import PhotoRecord, ReviewStatus
 
 
@@ -23,6 +29,48 @@ def make_photo(path: Path, status: ReviewStatus) -> PhotoRecord:
 
 
 class FileOperationTests(unittest.TestCase):
+    def test_rejected_photo_is_never_deleted_or_moved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "reject.jpg"
+            source.write_bytes(b"original")
+            rejected = make_photo(source, ReviewStatus.REJECTED)
+
+            moved = move_selected([rejected], root / "picked")
+
+            self.assertEqual(moved, [])
+            self.assertTrue(source.exists())
+            self.assertEqual(source.read_bytes(), b"original")
+
+    def test_manual_trash_uses_system_recycle_bin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "manual-delete.jpg"
+            source.write_bytes(b"original")
+            record = make_photo(source, ReviewStatus.REJECTED)
+
+            with patch("photo_fit_picker.fileops._send2trash") as send_to_trash:
+                trashed_path = move_photo_to_trash(record)
+
+            send_to_trash.assert_called_once_with(str(source.resolve()))
+            self.assertEqual(trashed_path, source.resolve())
+            self.assertEqual(record.status, ReviewStatus.TRASHED)
+
+    def test_failed_trash_does_not_change_photo_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "protected.jpg"
+            source.write_bytes(b"original")
+            record = make_photo(source, ReviewStatus.REJECTED)
+
+            with patch(
+                "photo_fit_picker.fileops._send2trash",
+                side_effect=OSError("permission denied"),
+            ):
+                with self.assertRaises(OSError):
+                    move_photo_to_trash(record)
+
+            self.assertEqual(record.status, ReviewStatus.REJECTED)
+            self.assertTrue(source.exists())
+
     def test_only_kept_photos_are_moved_and_can_be_undone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

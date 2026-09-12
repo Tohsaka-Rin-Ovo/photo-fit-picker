@@ -12,6 +12,7 @@ class ReviewStatus(str, Enum):
     KEPT = "kept"
     REJECTED = "rejected"
     MOVED = "moved"
+    TRASHED = "trashed"
 
 
 @dataclass
@@ -50,9 +51,14 @@ class PhotoGroup:
 
     @property
     def recommended(self) -> Optional[PhotoRecord]:
-        if not self.photos:
+        candidates = [
+            photo
+            for photo in self.photos
+            if photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
+        ]
+        if not candidates:
             return None
-        return max(self.photos, key=lambda photo: photo.quality_score)
+        return max(candidates, key=lambda photo: photo.quality_score)
 
     @property
     def kept_count(self) -> int:

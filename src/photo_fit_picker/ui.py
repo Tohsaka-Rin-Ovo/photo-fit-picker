@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 from PIL import Image, ImageOps
 
 from .analysis import SUPPORTED_EXTENSIONS, discover_images
-from .fileops import move_selected, undo_last_move
+from .fileops import move_photo_to_trash, move_selected, undo_last_move
 from .models import PhotoGroup, PhotoRecord, ReviewStatus
 from .worker import AnalysisWorker
 
@@ -78,6 +78,7 @@ def _read_preview(path: Path, target: QSize) -> QImage:
 class PhotoCard(QFrame):
     status_changed = Signal()
     open_requested = Signal(object)
+    trash_requested = Signal(object)
 
     def __init__(self, photo: PhotoRecord, recommended: bool, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -125,6 +126,10 @@ class PhotoCard(QFrame):
         layout.addWidget(details)
 
         actions = QHBoxLayout()
+        self.trash_button = QToolButton()
+        self.trash_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        self.trash_button.setToolTip("移到系统废纸篓/回收站")
+        self.trash_button.clicked.connect(lambda: self.trash_requested.emit(self.photo))
         self.keep_button = QPushButton("保留")
         self.keep_button.setCheckable(True)
         self.keep_button.setObjectName("keepButton")
@@ -133,6 +138,7 @@ class PhotoCard(QFrame):
         self.reject_button.setObjectName("rejectButton")
         self.keep_button.clicked.connect(lambda: self._set_status(ReviewStatus.KEPT))
         self.reject_button.clicked.connect(lambda: self._set_status(ReviewStatus.REJECTED))
+        actions.addWidget(self.trash_button)
         actions.addWidget(self.keep_button)
         actions.addWidget(self.reject_button)
         layout.addLayout(actions)
@@ -160,9 +166,12 @@ class PhotoCard(QFrame):
     def sync_status(self) -> None:
         self.keep_button.setChecked(self.photo.status == ReviewStatus.KEPT)
         self.reject_button.setChecked(self.photo.status == ReviewStatus.REJECTED)
-        is_moved = self.photo.status == ReviewStatus.MOVED
-        self.keep_button.setEnabled(not is_moved)
-        self.reject_button.setEnabled(not is_moved)
+        is_final = self.photo.status in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
+        self.keep_button.setEnabled(not is_final)
+        self.reject_button.setEnabled(not is_final)
+        self.trash_button.setEnabled(
+            self.photo.status != ReviewStatus.TRASHED and self.photo.path.is_file()
+        )
         self.setProperty("reviewStatus", self.photo.status.value)
         self.style().unpolish(self)
         self.style().polish(self)
@@ -179,6 +188,7 @@ class PreviewLabel(QLabel):
 
 class PhotoViewer(QDialog):
     status_changed = Signal()
+    trash_requested = Signal(object)
 
     def __init__(
         self,
@@ -219,6 +229,11 @@ class PhotoViewer(QDialog):
         self.info_label = QLabel()
         self.info_label.setObjectName("viewerInfo")
         controls.addWidget(self.info_label, 1)
+        self.trash_button = QToolButton()
+        self.trash_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        self.trash_button.setToolTip("移到系统废纸篓/回收站")
+        self.trash_button.clicked.connect(self._request_trash)
+        controls.addWidget(self.trash_button)
         self.reject_button = QPushButton("排除")
         self.reject_button.clicked.connect(lambda: self._set_status(ReviewStatus.REJECTED))
         controls.addWidget(self.reject_button)
@@ -257,15 +272,17 @@ class PhotoViewer(QDialog):
             ReviewStatus.KEPT: "已保留",
             ReviewStatus.REJECTED: "已排除",
             ReviewStatus.MOVED: "已移动",
+            ReviewStatus.TRASHED: "已移到回收站",
         }[photo.status]
         self.info_label.setText(
             f"{self.index + 1} / {len(self.photos)}  ·  {photo.display_name}  ·  {state}"
         )
         self.previous_button.setEnabled(self.index > 0)
         self.next_button.setEnabled(self.index < len(self.photos) - 1)
-        movable = photo.status != ReviewStatus.MOVED
+        movable = photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}
         self.keep_button.setEnabled(movable)
         self.reject_button.setEnabled(movable)
+        self.trash_button.setEnabled(photo.status != ReviewStatus.TRASHED and photo.path.is_file())
 
     def _previous(self) -> None:
         if self.index > 0:
@@ -279,10 +296,14 @@ class PhotoViewer(QDialog):
 
     def _set_status(self, status: ReviewStatus) -> None:
         photo = self.photos[self.index]
-        if photo.status == ReviewStatus.MOVED:
+        if photo.status in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
             return
         photo.status = ReviewStatus.PENDING if photo.status == status else status
         self.status_changed.emit()
+        self._load_current()
+
+    def _request_trash(self) -> None:
+        self.trash_requested.emit(self.photos[self.index])
         self._load_current()
 
 
@@ -654,6 +675,7 @@ class MainWindow(QMainWindow):
             card = PhotoCard(photo, photo is recommended)
             card.status_changed.connect(self._review_changed)
             card.open_requested.connect(self._open_viewer)
+            card.trash_requested.connect(self._confirm_trash)
             self.cards.append(card)
             self.photo_grid.addWidget(card, index // columns, index % columns)
 
@@ -676,7 +698,8 @@ class MainWindow(QMainWindow):
         if not group:
             return
         for photo in group.photos:
-            photo.status = status
+            if photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+                photo.status = status
         for card in self.cards:
             card.sync_status()
         self._review_changed()
@@ -687,6 +710,7 @@ class MainWindow(QMainWindow):
             return
         viewer = PhotoViewer(group.photos, group.photos.index(photo), self)
         viewer.status_changed.connect(self._review_changed)
+        viewer.trash_requested.connect(self._confirm_trash)
         viewer.exec()
         for card in self.cards:
             card.sync_status()
@@ -696,7 +720,10 @@ class MainWindow(QMainWindow):
         if not group or not group.recommended:
             return
         for photo in group.photos:
-            photo.status = ReviewStatus.KEPT if photo is group.recommended else ReviewStatus.REJECTED
+            if photo.status not in {ReviewStatus.MOVED, ReviewStatus.TRASHED}:
+                photo.status = (
+                    ReviewStatus.KEPT if photo is group.recommended else ReviewStatus.REJECTED
+                )
         for card in self.cards:
             card.sync_status()
         self._review_changed()
@@ -714,15 +741,39 @@ class MainWindow(QMainWindow):
             if item:
                 item.setText(self._group_label(group))
 
+    def _confirm_trash(self, photo: PhotoRecord) -> None:
+        answer = QMessageBox.warning(
+            self,
+            "确认移到回收站",
+            f"确定要将这张照片移到系统废纸篓/回收站吗？\n\n{photo.path}\n\n"
+            "这不是永久删除，可从系统废纸篓/回收站恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            source = move_photo_to_trash(photo)
+        except OSError as exc:
+            QMessageBox.critical(self, "无法移到回收站", str(exc))
+            return
+        self.statusBar().showMessage(f"已移到系统回收站：{source.name}", 8000)
+        for card in self.cards:
+            if card.photo is photo:
+                card.sync_status()
+        self._refresh_group_labels()
+        self._update_summary()
+
     def _update_summary(self) -> None:
         photos = [photo for group in self.groups for photo in group.photos]
         kept = sum(photo.status == ReviewStatus.KEPT for photo in photos)
         reviewed = sum(photo.status != ReviewStatus.PENDING for photo in photos)
         similar = sum(len(group.photos) > 1 for group in self.groups)
+        trashed = sum(photo.status == ReviewStatus.TRASHED for photo in photos)
         if photos:
             self.summary_label.setText(
                 f"共 {len(photos)} 张 · 已审核 {reviewed} 张\n"
-                f"已保留 {kept} 张 · 相似组 {similar} 个"
+                f"已保留 {kept} 张 · 已移到回收站 {trashed} 张 · 相似组 {similar} 个"
             )
         else:
             self.summary_label.setText("尚未分析照片")
@@ -836,6 +887,7 @@ def apply_theme(app: QApplication) -> None:
         #photoCard { background: #ffffff; border: 1px solid #dce2e0; border-radius: 8px; }
         #photoCard[reviewStatus="kept"] { border: 2px solid #25805f; background: #f5fbf8; }
         #photoCard[reviewStatus="rejected"] { border: 1px solid #c6ccca; background: #eef1f0; }
+        #photoCard[reviewStatus="trashed"] { border: 1px dashed #b3b9b7; background: #e5e8e7; }
         #previewFrame { background: #1d2422; border-radius: 4px; }
         #viewerImage { background: #121715; border-radius: 4px; }
         #photoName { font-weight: 600; }
