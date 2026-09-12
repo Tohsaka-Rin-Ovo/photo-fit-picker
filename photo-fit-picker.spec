@@ -28,11 +28,13 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon="assets/app.icns" if sys.platform == "darwin" else "assets/app.ico",
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         exe,
         name="拾影.app",
+        icon="assets/app.icns",
         bundle_identifier="com.photofitpicker.app",
     )

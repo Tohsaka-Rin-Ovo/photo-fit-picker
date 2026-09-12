@@ -71,6 +71,8 @@ chmod +x scripts/build-macos.sh
 ./scripts/build-macos.sh
 ```
 
+完成后可在 `dist/release/PhotoFitPicker-macOS.dmg` 找到安装包。
+
 Windows：双击 `scripts\build-windows.bat`，或在命令提示符中运行它。
 
 GitHub Actions 配置位于 `.github/workflows/build.yml`。手动运行工作流会生成临时构建产物；推送 `v*` 标签会自动创建 GitHub Release，上传 Windows 安装程序、macOS DMG 和 SHA-256 校验文件。PyInstaller 必须在目标操作系统上构建，因此不能只在 Mac 上直接生成可靠的 Windows 程序。
