@@ -1,11 +1,18 @@
 import unittest
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import numpy
 from PIL import Image
 
+import photo_fit_picker.analysis as analysis_module
 from photo_fit_picker.analysis import (
+    RAW_EXTENSIONS,
+    discover_images,
     extract_feature,
     group_similar_photos,
     hamming_distance,
@@ -29,6 +36,84 @@ def make_photo(name: str, hash_value: int, seconds: int, color: tuple[float, ...
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_common_camera_raw_extensions_are_discovered(self) -> None:
+        expected = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".dng", ".rw2"}
+        self.assertTrue(expected.issubset(RAW_EXTENSIONS))
+        with TemporaryDirectory() as temporary_directory:
+            folder = Path(temporary_directory)
+            for name in ("canon.CR3", "nikon.nef", "notes.txt"):
+                (folder / name).write_bytes(b"test")
+
+            discovered = {path.name for path in discover_images(folder)}
+
+            self.assertEqual(discovered, {"canon.CR3", "nikon.nef"})
+
+    def test_raw_embedded_preview_is_used_for_analysis(self) -> None:
+        buffer = BytesIO()
+        Image.new("RGB", (800, 600), (80, 140, 190)).save(buffer, format="JPEG")
+
+        class FakeRawFile:
+            sizes = SimpleNamespace(width=6000, height=4000)
+
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                return self
+
+            def __exit__(self, *args) -> None:  # type: ignore[no-untyped-def]
+                return None
+
+            def extract_thumb(self):  # type: ignore[no-untyped-def]
+                return SimpleNamespace(format="jpeg", data=buffer.getvalue())
+
+        fake_rawpy = SimpleNamespace(
+            ThumbFormat=SimpleNamespace(JPEG="jpeg"),
+            imread=lambda _: FakeRawFile(),
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "sample.cr3"
+            path.write_bytes(b"fake raw container")
+            with patch.object(analysis_module, "rawpy", fake_rawpy):
+                record = extract_feature(path)
+
+        self.assertEqual((record.width, record.height), (6000, 4000))
+        self.assertEqual(len(record.color_signature), 48)
+        self.assertGreater(record.exposure, 0.4)
+
+    def test_raw_without_preview_uses_half_size_postprocess(self) -> None:
+        class FakeRawFile:
+            sizes = SimpleNamespace(width=5000, height=3300)
+            postprocess_called = False
+
+            def __enter__(self):  # type: ignore[no-untyped-def]
+                return self
+
+            def __exit__(self, *args) -> None:  # type: ignore[no-untyped-def]
+                return None
+
+            def extract_thumb(self):  # type: ignore[no-untyped-def]
+                raise RuntimeError("no embedded preview")
+
+            def postprocess(self, **kwargs):  # type: ignore[no-untyped-def]
+                self.postprocess_called = True
+                self.postprocess_options = kwargs
+                return numpy.full((120, 180, 3), 128, dtype=numpy.uint8)
+
+        fake_raw = FakeRawFile()
+        fake_rawpy = SimpleNamespace(
+            ThumbFormat=SimpleNamespace(JPEG="jpeg"),
+            imread=lambda _: fake_raw,
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "sample.nef"
+            path.write_bytes(b"fake raw container")
+            with patch.object(analysis_module, "rawpy", fake_rawpy):
+                record = extract_feature(path)
+
+        self.assertTrue(fake_raw.postprocess_called)
+        self.assertTrue(fake_raw.postprocess_options["half_size"])
+        self.assertEqual((record.width, record.height), (5000, 3300))
+
     def test_extract_feature_reads_real_image(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "sample.jpg"

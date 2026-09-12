@@ -59,9 +59,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PIL import Image, ImageOps
+from PIL import Image
 
-from .analysis import SUPPORTED_EXTENSIONS, discover_images
+from .analysis import SUPPORTED_EXTENSIONS, discover_images, load_display_image
 from .fileops import move_photo_to_trash, move_photos, move_selected, undo_last_move
 from .models import PhotoGroup, PhotoRecord, ReviewStatus
 from .worker import AnalysisWorker
@@ -79,8 +79,8 @@ def _read_preview(path: Path, target: QSize) -> QImage:
         return image
 
     try:
-        with Image.open(path) as source:
-            fallback = ImageOps.exif_transpose(source).convert("RGBA")
+        with load_display_image(path) as source:
+            fallback = source.convert("RGBA")
             fallback.thumbnail((target.width(), target.height()), Image.Resampling.LANCZOS)
             width, height = fallback.size
             return QImage(
@@ -930,10 +930,17 @@ class MainWindow(QMainWindow):
             8000,
         )
         if failures:
+            details = "\n".join(
+                f"{path.name}：{message.splitlines()[0]}"
+                for path, message in failures[:6]
+            )
+            if len(failures) > 6:
+                details += f"\n另有 {len(failures) - 6} 个文件…"
             QMessageBox.warning(
                 self,
                 "部分照片未能读取",
-                f"有 {len(failures)} 个文件未能读取，其他照片已正常完成分析。",
+                f"有 {len(failures)} 个文件未能读取，其他照片已正常完成分析。\n\n"
+                f"{details}",
             )
 
     def _analysis_failed(self, message: str) -> None:

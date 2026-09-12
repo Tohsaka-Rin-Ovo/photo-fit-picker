@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
@@ -15,8 +16,13 @@ try:
 except ImportError:
     pass
 
+try:
+    import rawpy
+except ImportError:
+    rawpy = None
 
-SUPPORTED_EXTENSIONS = {
+
+STANDARD_EXTENSIONS = {
     ".jpg",
     ".jpeg",
     ".png",
@@ -27,6 +33,51 @@ SUPPORTED_EXTENSIONS = {
     ".heic",
     ".heif",
 }
+
+RAW_EXTENSIONS = {
+    ".3fr",
+    ".arw",
+    ".bay",
+    ".bmq",
+    ".cap",
+    ".cr2",
+    ".cr3",
+    ".crw",
+    ".dcr",
+    ".dcs",
+    ".dng",
+    ".drf",
+    ".eip",
+    ".erf",
+    ".fff",
+    ".gpr",
+    ".iiq",
+    ".k25",
+    ".kdc",
+    ".mdc",
+    ".mef",
+    ".mos",
+    ".mrw",
+    ".nef",
+    ".nrw",
+    ".orf",
+    ".ori",
+    ".pef",
+    ".ptx",
+    ".pxn",
+    ".r3d",
+    ".raf",
+    ".raw",
+    ".rw2",
+    ".rwl",
+    ".rwz",
+    ".sr2",
+    ".srf",
+    ".srw",
+    ".x3f",
+}
+
+SUPPORTED_EXTENSIONS = STANDARD_EXTENSIONS | RAW_EXTENSIONS
 
 
 def discover_images(folder: Path, recursive: bool = True) -> list[Path]:
@@ -48,6 +99,49 @@ def _capture_time(image: Image.Image, path: Path) -> datetime:
     except (AttributeError, TypeError, ValueError, OverflowError):
         pass
     return datetime.fromtimestamp(path.stat().st_mtime)
+
+
+def _raw_image(path: Path) -> tuple[Image.Image, int, int]:
+    if rawpy is None:
+        raise RuntimeError("读取 RAW 照片需要安装 rawpy")
+
+    with rawpy.imread(str(path)) as raw:
+        width = int(raw.sizes.width)
+        height = int(raw.sizes.height)
+        try:
+            thumbnail = raw.extract_thumb()
+            if thumbnail.format == rawpy.ThumbFormat.JPEG:
+                with Image.open(BytesIO(thumbnail.data)) as embedded:
+                    image = ImageOps.exif_transpose(embedded).convert("RGB")
+            else:
+                image = Image.fromarray(thumbnail.data).convert("RGB")
+        except Exception:
+            rgb = raw.postprocess(
+                use_camera_wb=True,
+                half_size=True,
+                no_auto_bright=False,
+                output_bps=8,
+            )
+            image = Image.fromarray(rgb).convert("RGB")
+    return image, width, height
+
+
+def _decoded_image(path: Path) -> tuple[Image.Image, int, int, datetime]:
+    if path.suffix.lower() in RAW_EXTENSIONS:
+        image, width, height = _raw_image(path)
+        return image, width, height, _capture_time(image, path)
+
+    with Image.open(path) as source:
+        captured_at = _capture_time(source, path)
+        oriented = ImageOps.exif_transpose(source)
+        oriented.load()
+        image = oriented.copy()
+    return image, image.width, image.height, captured_at
+
+
+def load_display_image(path: Path) -> Image.Image:
+    image, _, _, _ = _decoded_image(path)
+    return image
 
 
 def _difference_hash(image: Image.Image) -> int:
@@ -88,13 +182,13 @@ def _quality_metrics(image: Image.Image) -> tuple[float, float]:
 
 
 def extract_feature(path: Path) -> PhotoRecord:
-    with Image.open(path) as source:
-        image = ImageOps.exif_transpose(source)
-        width, height = image.size
-        captured_at = _capture_time(source, path)
+    image, width, height, captured_at = _decoded_image(path)
+    try:
         dhash = _difference_hash(image)
         signature = _color_signature(image)
         sharpness, exposure = _quality_metrics(image)
+    finally:
+        image.close()
     return PhotoRecord(
         path=path,
         width=width,

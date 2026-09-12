@@ -5,13 +5,14 @@ import sys
 from PyInstaller.utils.hooks import collect_all
 
 heif_data, heif_binaries, heif_hidden = collect_all("pillow_heif")
+raw_data, raw_binaries, raw_hidden = collect_all("rawpy")
 
 a = Analysis(
     ["run_app.py"],
     pathex=["src"],
-    binaries=heif_binaries,
-    datas=heif_data,
-    hiddenimports=heif_hidden + ["photo_fit_picker.ui"],
+    binaries=heif_binaries + raw_binaries,
+    datas=heif_data + raw_data,
+    hiddenimports=heif_hidden + raw_hidden + ["photo_fit_picker.ui"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

@@ -4,7 +4,7 @@
 
 ## 当前功能
 
-- 拖入或选择整个照片文件夹，递归扫描 JPG、PNG、WebP、TIFF、HEIC 等格式。
+- 拖入或选择整个照片文件夹，递归扫描常规图片、HEIC 和主流相机 RAW。
 - 根据 EXIF 时间、感知哈希和色彩分布对近似照片分组。
 - 以清晰度和曝光为依据标出每组推荐照片，但不会自动移动。
 - 支持单张保留/排除、本组全部保留/排除、仅保留推荐照片。
@@ -17,6 +17,14 @@
 - “排除”只记录审核状态，不删除文件；程序不会自动删除任何照片。
 - 用户可逐张选择“移到回收站”，每次必须经过确认弹窗，并由系统回收站保留恢复能力。
 - 所有分析在电脑本地完成，不上传照片。
+
+## 图片格式
+
+常规格式包括 JPG、JPEG、PNG、WebP、BMP、TIFF、HEIC 和 HEIF。
+
+RAW 通过 LibRaw/rawpy 读取，目前纳入扫描的格式包括 Canon CR2/CR3/CRW、Nikon NEF/NRW、Sony ARW/SR2/SRF、Fujifilm RAF、Adobe DNG、Panasonic RW2/RWL、Olympus ORF/ORI、Pentax PEF/PTX、Samsung SRW、Sigma X3F，以及 3FR、DCR、ERF、FFF、GPR、IIQ、KDC、MEF、MOS、MRW、R3D 等格式。
+
+程序优先使用 RAW 内嵌预览图进行快速分析；没有预览图时才进行半尺寸显影。移动、撤销和回收站操作针对完整 RAW 原文件，不会把预览图写回原文件。新相机或厂商特殊 RAW 变体能否读取取决于安装包所带的 LibRaw 版本。
 
 ## 运行源码
 
@@ -58,4 +66,4 @@ GitHub Actions 配置位于 `.github/workflows/build.yml`。推送 `v*` 标签�
 
 ## 第一版算法边界
 
-当前算法适合连拍、同机位轻微变化、人物表情不同等近似画面。它不做人物身份识别，也不会理解“这张构图更有故事感”。后续可增加人脸闭眼检测、重复截图检测、CLIP 语义聚类和 RAW 格式支持。
+当前算法适合连拍、同机位轻微变化、人物表情不同等近似画面。它不做人物身份识别，也不会理解“这张构图更有故事感”。后续可增加人脸闭眼检测、重复截图检测、CLIP 语义聚类，以及 RAW+JPEG/XMP 配对管理。
