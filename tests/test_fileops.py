@@ -147,6 +147,19 @@ class FileOperationTests(unittest.TestCase):
             self.assertEqual((destination / "same.jpg").read_bytes(), b"first")
             self.assertEqual((destination / "same_2.jpg").read_bytes(), b"second")
 
+    def test_move_to_current_folder_is_rejected_without_renaming_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory)
+            path = source / "keep.jpg"
+            path.write_bytes(b"original")
+
+            with self.assertRaisesRegex(OSError, "当前所在文件夹相同"):
+                move_selected([make_photo(path, ReviewStatus.KEPT)], source)
+
+            self.assertEqual(path.read_bytes(), b"original")
+            self.assertFalse((source / "keep_2.jpg").exists())
+            self.assertEqual(read_history(source), [])
+
     def test_raw_jpeg_and_xmp_are_moved_and_undone_together(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

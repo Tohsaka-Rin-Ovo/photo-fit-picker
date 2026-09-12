@@ -174,10 +174,15 @@ def _plan_photo_moves(
     planned: list[MoveEntry] = []
     source_paths = seen if seen is not None else set()
     destinations = reserved if reserved is not None else set()
+    destination = destination.resolve()
     for photo in records:
         for source in linked_asset_paths(photo.path):
             if source in source_paths:
                 continue
+            if source.parent == destination:
+                raise OSError(
+                    f"目标文件夹与照片当前所在文件夹相同：{destination}"
+                )
             source_paths.add(source)
             target = _reserved_destination(destination, source.name, destinations)
             planned.append(
