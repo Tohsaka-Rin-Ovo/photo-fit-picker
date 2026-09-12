@@ -78,6 +78,7 @@ from .fileops import (
     move_photos,
     move_selected,
     plan_organization_moves,
+    read_history,
     undo_last_move,
 )
 from .models import AnalysisOptions, PhotoGroup, PhotoRecord, ReviewStatus
@@ -85,10 +86,10 @@ from .organizer import OrganizationGroup, OrganizationPlan, build_organization_p
 from .worker import AnalysisWorker
 
 
-ICON_COLOR = "#d8dcdf"
-ICON_MUTED = "#777d84"
-ICON_ACCENT = "#9de0bd"
-ICON_DANGER = "#f08b91"
+ICON_COLOR = "#5f6872"
+ICON_MUTED = "#7d8791"
+ICON_ACCENT = "#23835b"
+ICON_DANGER = "#d3525d"
 
 REVIEW_PRESETS = {
     "conservative": (90, 45, 14),
@@ -120,6 +121,11 @@ def _setting_bool(settings: QSettings, key: str, default: bool = False) -> bool:
 
 def _reduced_motion() -> bool:
     return _setting_bool(QSettings(), "appearance/reduce_motion")
+
+
+def _theme_setting(settings: QSettings) -> str:
+    value = str(settings.value("appearance/theme", "light"))
+    return {"graphite": "light", "black": "dark"}.get(value, value)
 
 
 def _read_preview(path: Path, target: QSize) -> QImage:
@@ -235,7 +241,11 @@ class _RippleFeedback:
         color = (
             QColor(23, 51, 37)
             if self.owner.objectName() in {"primaryButton", "emptyPrimaryButton"}
-            else QColor(255, 255, 255)
+            else (
+                QColor(255, 255, 255)
+                if _theme_setting(QSettings()) == "dark"
+                else QColor(44, 57, 68)
+            )
         )
         color.setAlpha(int(34 * (1.0 - self.progress)))
         painter.setPen(Qt.PenStyle.NoPen)
@@ -321,7 +331,13 @@ class SettingsSwitch(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = QRectF(1, 2, 40, 20)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#4f9f78") if self.isChecked() else QColor("#3a3e43"))
+        if self.isChecked():
+            track_color = QColor("#2f9b69")
+        elif _theme_setting(QSettings()) == "dark":
+            track_color = QColor("#3a3e43")
+        else:
+            track_color = QColor("#c8ced3")
+        painter.setBrush(track_color)
         painter.drawRoundedRect(track, 10, 10)
         knob_x = 21 if self.isChecked() else 3
         painter.setBrush(QColor("#f3f5f4"))
@@ -344,7 +360,7 @@ class PhotoCard(QFrame):
         self.recommended = recommended
         self.setObjectName("photoCard")
         self.setProperty("reviewStatus", photo.status.value)
-        self.setFixedWidth(286)
+        self.setFixedWidth(268)
         self.feedback_timer = QTimer(self)
         self.feedback_timer.setSingleShot(True)
         self.feedback_timer.timeout.connect(self._clear_feedback)
@@ -355,12 +371,12 @@ class PhotoCard(QFrame):
 
         preview_frame = QFrame()
         preview_frame.setObjectName("previewFrame")
-        preview_frame.setFixedSize(286, 190)
+        preview_frame.setFixedSize(268, 179)
         preview_layout = QVBoxLayout(preview_frame)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         self.preview = PreviewLabel("正在载入…")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setFixedSize(286, 190)
+        self.preview.setFixedSize(268, 179)
         self.preview.setCursor(Qt.CursorShape.PointingHandCursor)
         self.preview.setToolTip("打开大图预览")
         self.preview.clicked.connect(lambda: self.open_requested.emit(self.photo))
@@ -372,7 +388,7 @@ class PhotoCard(QFrame):
         self.select_box.setToolTip("选择照片以执行批量操作")
         self.select_box.setChecked(photo.selected)
         self.select_box.setParent(preview_frame)
-        self.select_box.move(250, 10)
+        self.select_box.move(232, 10)
         self.select_box.stateChanged.connect(self._selection_changed)
         self.select_box.raise_()
 
@@ -388,7 +404,7 @@ class PhotoCard(QFrame):
         self.action_panel = QFrame(preview_frame)
         self.action_panel.setObjectName("cardActions")
         self.action_panel.setFixedSize(76, 36)
-        self.action_panel.move(200, 144)
+        self.action_panel.move(182, 133)
         action_layout = QHBoxLayout(self.action_panel)
         action_layout.setContentsMargins(2, 2, 2, 2)
         action_layout.setSpacing(4)
@@ -429,7 +445,7 @@ class PhotoCard(QFrame):
             name.fontMetrics().elidedText(
                 display_name,
                 Qt.TextElideMode.ElideMiddle,
-                180,
+                164,
             )
         )
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -459,7 +475,7 @@ class PhotoCard(QFrame):
             secondary.fontMetrics().elidedText(
                 secondary_text,
                 Qt.TextElideMode.ElideRight,
-                258,
+                240,
             )
         )
         secondary.setToolTip(secondary_text)
@@ -470,7 +486,7 @@ class PhotoCard(QFrame):
         self._load_thumbnail()
 
     def _load_thumbnail(self) -> None:
-        image = _read_preview(self.photo.path, QSize(572, 380))
+        image = _read_preview(self.photo.path, QSize(536, 358))
         if image.isNull():
             self.preview.setText("无法预览")
             return
@@ -1167,9 +1183,9 @@ class SettingsView(QWidget):
             1,
         )
         self.theme_combo = QComboBox()
-        self.theme_combo.addItem("石墨深色", "graphite")
-        self.theme_combo.addItem("沉浸黑", "black")
-        saved_theme = str(self.preferences.value("appearance/theme", "graphite"))
+        self.theme_combo.addItem("明亮", "light")
+        self.theme_combo.addItem("深色", "dark")
+        saved_theme = _theme_setting(self.preferences)
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(saved_theme)))
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
         theme_row.addWidget(self.theme_combo)
@@ -1503,7 +1519,7 @@ class SettingsView(QWidget):
         self.reanalyze_button.setEnabled(has_source and not is_running)
 
     def refresh_preferences(self) -> None:
-        theme = str(self.preferences.value("appearance/theme", "graphite"))
+        theme = _theme_setting(self.preferences)
         self.theme_combo.blockSignals(True)
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(theme)))
         self.theme_combo.blockSignals(False)
@@ -1702,59 +1718,31 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        header = QFrame()
-        header.setObjectName("header")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(18, 10, 18, 10)
-        header_layout.setSpacing(10)
-
-        mark = QLabel()
-        mark.setObjectName("appMark")
-        mark.setPixmap(_icon("camera-iris", ICON_ACCENT).pixmap(24, 24))
-        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark.setFixedSize(38, 38)
-        header_layout.addWidget(mark)
-
-        title_box = QVBoxLayout()
-        title_box.setSpacing(1)
-        title = QLabel("拾影")
-        title.setObjectName("appTitle")
-        self.source_label = QLabel("本地照片筛选")
-        self.source_label.setObjectName("sourceLabel")
-        self.source_label.setMaximumWidth(420)
-        title_box.addWidget(title)
-        title_box.addWidget(self.source_label)
-        header_layout.addLayout(title_box)
-        header_layout.addStretch()
-
         self.undo_button = FeedbackToolButton()
-        self.undo_button.setObjectName("headerIconButton")
+        self.undo_button.setObjectName("toolbarIconButton")
         self.undo_button.setIcon(_icon("undo-variant"))
         self.undo_button.setIconSize(QSize(19, 19))
         self.undo_button.setToolTip("撤销上一次移动")
         self.undo_button.clicked.connect(self._undo_move)
-        header_layout.addWidget(self.undo_button)
 
         self.organize_button = FeedbackButton("整理")
+        self.organize_button.setObjectName("sidebarUtilityButton")
         self.organize_button.setIcon(_icon("folder-marker-outline"))
         self.organize_button.setToolTip("预览智能整理建议")
         self.organize_button.clicked.connect(self._open_organization)
-        header_layout.addWidget(self.organize_button)
 
         self.move_button = FeedbackButton("移动保留项")
         self.move_button.setIcon(_icon("export-variant", "#173325"))
         self.move_button.setIconSize(QSize(18, 18))
         self.move_button.setObjectName("primaryButton")
         self.move_button.clicked.connect(self._move_kept)
-        header_layout.addWidget(self.move_button)
-        root_layout.addWidget(header)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
         self.sidebar = self._build_sidebar()
         self.main_splitter.addWidget(self.sidebar)
         self.main_splitter.addWidget(self._build_content())
-        self.main_splitter.setSizes([232, 1048])
+        self.main_splitter.setSizes([216, 1064])
         root_layout.addWidget(self.main_splitter, 1)
 
         self.root_stack.addWidget(self.workspace)
@@ -1830,6 +1818,28 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 14, 12, 12)
         layout.setSpacing(10)
 
+        brand = QWidget()
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(4, 0, 4, 8)
+        brand_layout.setSpacing(9)
+        mark = QLabel()
+        mark.setObjectName("appMark")
+        mark.setPixmap(_icon("camera-iris", ICON_ACCENT).pixmap(20, 20))
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(32, 32)
+        brand_layout.addWidget(mark)
+        title_box = QVBoxLayout()
+        title_box.setSpacing(0)
+        title = QLabel("拾影")
+        title.setObjectName("appTitle")
+        self.source_label = QLabel("本地照片筛选")
+        self.source_label.setObjectName("sourceLabel")
+        self.source_label.setMaximumWidth(148)
+        title_box.addWidget(title)
+        title_box.addWidget(self.source_label)
+        brand_layout.addLayout(title_box, 1)
+        layout.addWidget(brand)
+
         self.folder_button = FeedbackButton("照片文件夹")
         self.folder_button.setObjectName("sidebarButton")
         self.folder_button.setIcon(_icon("folder-open-outline"))
@@ -1880,6 +1890,8 @@ class MainWindow(QMainWindow):
         review_layout.addWidget(self.summary_label)
         layout.addWidget(self.sidebar_review_panel, 100)
         layout.addStretch(1)
+
+        layout.addWidget(self.organize_button)
 
         self.settings_button = FeedbackButton("设置")
         self.settings_button.setObjectName("settingsButton")
@@ -1989,12 +2001,15 @@ class MainWindow(QMainWindow):
         self.group_more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(self.group_more_button)
 
+        toolbar.addWidget(self.undo_button)
+
         self.recommend_button = FeedbackButton("保留最佳并继续")
         self.recommend_button.setIcon(_icon("check-bold", "#173325"))
         self.recommend_button.setIconSize(QSize(18, 18))
         self.recommend_button.setObjectName("primaryButton")
         self.recommend_button.clicked.connect(self._keep_recommended_and_advance)
         toolbar.addWidget(self.recommend_button)
+        toolbar.addWidget(self.move_button)
         review_layout.addWidget(toolbar_frame)
 
         self.photo_scroll = QScrollArea()
@@ -2407,10 +2422,9 @@ class MainWindow(QMainWindow):
         self.group_title.setText(f"照片组 {group.id:02d}")
         self.group_meta.setText(
             f"{row + 1} / {len(self.visible_groups)}  ·  {len(group.photos)} 张"
-            f"  ·  {group.photos[0].captured_at:%Y-%m-%d %H:%M}"
         )
         recommended = group.recommended
-        columns = max(1, self.photo_scroll.viewport().width() // 302)
+        columns = max(1, self.photo_scroll.viewport().width() // 280)
         self._grid_columns = columns
         for index, photo in enumerate(group.photos):
             card = PhotoCard(photo, photo is recommended)
@@ -2446,7 +2460,7 @@ class MainWindow(QMainWindow):
     def _reflow_cards(self) -> None:
         if not self.cards:
             return
-        columns = max(1, self.photo_scroll.viewport().width() // 302)
+        columns = max(1, self.photo_scroll.viewport().width() // 280)
         if columns == self._grid_columns:
             return
         self._grid_columns = columns
@@ -2689,7 +2703,12 @@ class MainWindow(QMainWindow):
             self.review_progress.setValue(0)
         self.move_button.setText(f"移动 {kept} 张" if kept else "移动保留项")
         self.move_button.setEnabled(kept > 0)
-        self.undo_button.setEnabled(self.destination_folder is not None)
+        self.move_button.setVisible(kept > 0)
+        has_history = bool(
+            self.destination_folder and read_history(self.destination_folder)
+        )
+        self.undo_button.setEnabled(has_history)
+        self.undo_button.setVisible(has_history)
 
     def _move_kept(self) -> None:
         photos = [photo for group in self.groups for photo in group.photos]
@@ -2797,7 +2816,8 @@ class MainWindow(QMainWindow):
 
 def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
     app.setStyle("Fusion")
-    mode = theme_mode or str(QSettings().value("appearance/theme", "graphite"))
+    mode = theme_mode or _theme_setting(QSettings())
+    mode = {"graphite": "light", "black": "dark"}.get(mode, mode)
     stylesheet = """
         QWidget {
             color: #f2f3f4;
@@ -2834,7 +2854,7 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             background: #181a1d;
             border-right: 1px solid #2c3035;
         }
-        #settingsButton {
+        #settingsButton, #sidebarUtilityButton {
             min-height: 38px;
             padding-left: 8px;
             text-align: left;
@@ -2842,7 +2862,7 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             background: transparent;
             border-color: transparent;
         }
-        #settingsButton:hover {
+        #settingsButton:hover, #sidebarUtilityButton:hover {
             color: #f2f3f4;
             background: #25282c;
             border-color: transparent;
@@ -3454,7 +3474,7 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             border-color: #77444c;
         }
         """
-    if mode == "black":
+    if mode == "dark":
         stylesheet += """
             QMainWindow, #appRoot, QStackedWidget, #emptyState,
             #reviewWorkspace, QScrollArea, #photo_grid_host,
@@ -3470,6 +3490,312 @@ def apply_theme(app: QApplication, theme_mode: Optional[str] = None) -> None:
             }
             #photoCard, #settingsGroup {
                 background: #181a1d;
+            }
+        """
+    else:
+        stylesheet += """
+            QWidget {
+                color: #20252b;
+            }
+            QMainWindow, #appRoot, QStackedWidget, #emptyState,
+            #reviewWorkspace, QScrollArea, #photo_grid_host,
+            #settingsView, #settingsContent, #settingsPages, #settingsPage,
+            #organizationView, #organizationDetail {
+                background: #f7f8f9;
+            }
+            #sidebar, #settingsSidebar, #organizationSidebar {
+                background: #eef1f3;
+                border-color: #d9dee2;
+            }
+            #appMark {
+                background: #ffffff;
+                border-color: #d8dde1;
+            }
+            #appTitle, #groupTitle, #emptyTitle, #settingsTitle,
+            #settingsSectionTitle, #organizationTitle, #viewerSectionTitle {
+                color: #171b1f;
+            }
+            #sourceLabel, #photoDetails, #photoSecondaryDetails, #groupMeta,
+            #emptyHint, #summaryLabel, #viewerInfo, #settingsSectionHint,
+            #settingsRowHint, #settingsPath, #organizationSummary,
+            #organizationGroupMeta, #viewerReason, #viewerMetadataLabel {
+                color: #707983;
+            }
+            #sectionTitle {
+                color: #737d86;
+            }
+            #progressCount, #settingsValue {
+                color: #16734d;
+            }
+            QPushButton, QComboBox, QSpinBox, QToolButton {
+                color: #30363c;
+                background: #ffffff;
+                border-color: #d4d9de;
+            }
+            QPushButton:hover, QToolButton:hover {
+                color: #171b1f;
+                background: #f1f3f5;
+                border-color: #bcc3ca;
+            }
+            QPushButton:pressed, QToolButton:pressed {
+                background: #e5e9ec;
+                border-color: #aeb6be;
+            }
+            QPushButton:disabled, QToolButton:disabled {
+                color: #a5acb3;
+                background: #f1f3f4;
+                border-color: #e0e4e7;
+            }
+            #primaryButton, #emptyPrimaryButton {
+                color: #ffffff;
+                background: #16865b;
+                border-color: #16865b;
+            }
+            #primaryButton:hover, #emptyPrimaryButton:hover {
+                color: #ffffff;
+                background: #11764f;
+                border-color: #11764f;
+            }
+            #primaryButton:pressed, #emptyPrimaryButton:pressed {
+                color: #ffffff;
+                background: #0d6744;
+                border-color: #0d6744;
+            }
+            #primaryButton:disabled {
+                color: #8ea69a;
+                background: #dce7e1;
+                border-color: #dce7e1;
+            }
+            #headerIconButton, #toolbarIconButton, #batchIconButton,
+            #quietButton, #disclosureButton, #sidebarButton,
+            #settingsButton, #sidebarUtilityButton {
+                color: #4f5962;
+                background: transparent;
+                border-color: transparent;
+            }
+            #headerIconButton:hover, #toolbarIconButton:hover, #batchIconButton:hover,
+            #quietButton:hover, #disclosureButton:hover, #sidebarButton:hover,
+            #settingsButton:hover, #sidebarUtilityButton:hover {
+                color: #171b1f;
+                background: #dfe4e8;
+                border-color: transparent;
+            }
+            #settingsButton, #sidebarUtilityButton {
+                min-height: 38px;
+                padding-left: 8px;
+                text-align: left;
+            }
+            QListWidget::item {
+                color: #3c444c;
+            }
+            QListWidget::item:hover {
+                background: #e3e7ea;
+            }
+            QListWidget::item:selected {
+                color: #18212a;
+                background: #d8e2ea;
+            }
+            QComboBox QAbstractItemView {
+                color: #252b31;
+                background: #ffffff;
+                selection-color: #17212a;
+                selection-background-color: #dce7ef;
+                border-color: #cbd1d6;
+            }
+            #photoCard {
+                background: #ffffff;
+                border-color: #dce1e5;
+            }
+            #photoCard:hover {
+                background: #ffffff;
+                border-color: #aeb7bf;
+            }
+            #photoCard[selected="true"] {
+                background: #ffffff;
+                border: 2px solid #3186c8;
+            }
+            #photoCard[reviewStatus="kept"] {
+                background: #f2faf5;
+                border: 2px solid #35a36f;
+            }
+            #photoCard[reviewStatus="kept"][selected="true"] {
+                border: 2px solid #3186c8;
+            }
+            #photoCard[reviewStatus="rejected"] {
+                background: #f4f5f6;
+                border-color: #d5dade;
+            }
+            #photoCard[reviewStatus="trashed"] {
+                background: #f1f2f3;
+                border-color: #c8cdd1;
+            }
+            #photoName {
+                color: #20252a;
+            }
+            #photoStatus {
+                color: #68717a;
+                background: #e9ecef;
+            }
+            #photoStatus[reviewStatus="kept"] {
+                color: #126b46;
+                background: #dcefe4;
+            }
+            #photoStatus[reviewStatus="rejected"] {
+                color: #667079;
+                background: #e3e6e8;
+            }
+            #photoStatus[reviewStatus="moved"] {
+                color: #26658f;
+                background: #dbeaf4;
+            }
+            #photoStatus[reviewStatus="trashed"] {
+                color: #a13d46;
+                background: #f2dfe1;
+            }
+            #batchBar {
+                background: #eef6fb;
+                border-color: #8cb9d8;
+            }
+            #batchCount {
+                color: #245f86;
+            }
+            QSlider::groove:horizontal {
+                background: #d6dce0;
+            }
+            QSlider::sub-page:horizontal, QProgressBar::chunk {
+                background: #38a879;
+            }
+            QSlider::handle:horizontal {
+                background: #ffffff;
+                border-color: #318d67;
+            }
+            QProgressBar {
+                color: #4f5962;
+                background: #dce1e4;
+            }
+            QScrollBar::handle:vertical {
+                background: #c7cdd2;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #aeb6bd;
+            }
+            QMenu {
+                color: #252b31;
+                background: #ffffff;
+                border-color: #cdd3d8;
+            }
+            QMenu::item:selected {
+                background: #e2e8ed;
+            }
+            #settingsContent, #organizationDetail {
+                background: #f8f9fa;
+            }
+            #settingsNavButton, #settingsBackButton {
+                color: #59636c;
+            }
+            #settingsNavButton:hover, #settingsBackButton:hover {
+                color: #20262b;
+                background: #e0e5e8;
+            }
+            #settingsNavButton:checked {
+                color: #17212a;
+                background: #d7e0e6;
+            }
+            #settingsRowTitle {
+                color: #272d32;
+            }
+            #settingsGroup {
+                background: #ffffff;
+                border-color: #dce1e5;
+            }
+            #settingsDivider, #viewerDivider {
+                background: #e1e5e8;
+            }
+            #settingsActionButton {
+                background: #f3f5f6;
+            }
+            #organizationHeader {
+                background: #ffffff;
+                border-color: #dce1e5;
+            }
+            #organizationSafety {
+                color: #166d49;
+                background: #e2f1e8;
+            }
+            #organizationNameEdit {
+                color: #20262b;
+                background: #ffffff;
+                border-color: #cfd5da;
+            }
+            #organizationPhotoList {
+                background: #ffffff;
+                border-color: #d9dee2;
+            }
+            #organizationPhotoList::item {
+                border-color: #e7eaed;
+            }
+            #organizationPhotoList::item:selected {
+                background: #dbe8f1;
+            }
+            QStatusBar {
+                color: #737c84;
+                background: #f2f4f5;
+                border-color: #dce1e4;
+            }
+            QSplitter::handle {
+                background: #d9dee2;
+            }
+            QToolTip {
+                color: #ffffff;
+                background: #2b3035;
+                border-color: #2b3035;
+            }
+            QMessageBox {
+                background: #f7f8f9;
+            }
+            QMessageBox QLabel {
+                color: #242a2f;
+            }
+            QDialog#photoViewer {
+                background: #eef1f3;
+            }
+            QDialog#photoViewer #viewerImage {
+                color: #8a9299;
+                background: #111315;
+                border-color: #ccd2d7;
+            }
+            QDialog#photoViewer #viewerInspectorScroll,
+            QDialog#photoViewer #viewerInspector {
+                background: #ffffff;
+            }
+            QDialog#photoViewer #viewerInspector {
+                border-color: #d7dce0;
+            }
+            QDialog#photoViewer #viewerMetadataValue,
+            QDialog#photoViewer #viewerQuality {
+                color: #30363b;
+            }
+            QDialog#photoViewer #viewerSectionTitle {
+                color: #171b1f;
+            }
+            QDialog#photoViewer #viewerInfo {
+                color: #4e5861;
+            }
+            QDialog#photoViewer QPushButton,
+            QDialog#photoViewer QToolButton {
+                color: #343b42;
+                background: #ffffff;
+                border-color: #cfd5da;
+            }
+            QDialog#photoViewer QPushButton:hover,
+            QDialog#photoViewer QToolButton:hover {
+                background: #e5e9ec;
+                border-color: #b7bfc6;
+            }
+            QDialog#photoViewer #primaryButton {
+                color: #ffffff;
+                background: #16865b;
+                border-color: #16865b;
             }
         """
     app.setStyleSheet(stylesheet)
