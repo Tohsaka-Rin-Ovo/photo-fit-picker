@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "Pillow>=10.0,<13",
-    "PySide6>=6.6,<7",
+    "PySide6-Essentials>=6.6,<7",
     "pillow-heif>=0.16,<1",
     "rawpy>=0.19,<1",
 ]

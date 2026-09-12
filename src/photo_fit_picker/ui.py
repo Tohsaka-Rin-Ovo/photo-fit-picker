@@ -122,6 +122,22 @@ def _prepare_demo_folder() -> Path:
     return destination
 
 
+def _confirm_recoverable_trash(parent: QWidget, title: str, message: str) -> bool:
+    dialog = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=parent)
+    confirm = dialog.addButton("移到回收站", QMessageBox.ButtonRole.AcceptRole)
+    confirm.setObjectName("destructiveButton")
+    confirm.setStyleSheet(
+        "QPushButton { color: #ffffff; background: #9a4542; "
+        "border: 1px solid #9a4542; border-radius: 6px; padding: 0 12px; }"
+        "QPushButton:hover { background: #843936; border-color: #843936; }"
+    )
+    cancel = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    dialog.setDefaultButton(cancel)
+    dialog.setEscapeButton(cancel)
+    dialog.exec()
+    return dialog.clickedButton() is confirm
+
+
 class _RippleFeedback:
     def __init__(self, owner: QWidget) -> None:
         self.owner = owner
@@ -1178,15 +1194,13 @@ class MainWindow(QMainWindow):
                 item.setText(self._group_label(group))
 
     def _confirm_trash(self, photo: PhotoRecord) -> None:
-        answer = QMessageBox.warning(
+        confirmed = _confirm_recoverable_trash(
             self,
             "确认移到回收站",
             f"确定要将这张照片移到系统废纸篓/回收站吗？\n\n{photo.path}\n\n"
             "这不是永久删除，可从系统废纸篓/回收站恢复。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not confirmed:
             return
         try:
             source = move_photo_to_trash(photo)
@@ -1204,16 +1218,14 @@ class MainWindow(QMainWindow):
         selected = self._selected_photos()
         if not selected:
             return
-        answer = QMessageBox.warning(
+        confirmed = _confirm_recoverable_trash(
             self,
             "确认批量移到回收站",
             f"确定要将选中的 {len(selected)} 张照片移到"
             "系统废纸篓/回收站吗？\n\n"
             "这不是永久删除，可从系统废纸篓/回收站恢复。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if not confirmed:
             return
         moved_count = 0
         errors: list[str] = []
@@ -1668,6 +1680,24 @@ def apply_theme(app: QApplication) -> None:
             color: #ffffff;
             background: #262d2a;
             border: 0;
+        }
+        QMessageBox {
+            background: #f6f7f5;
+        }
+        QMessageBox QLabel {
+            color: #202522;
+        }
+        QMessageBox QPushButton {
+            min-width: 88px;
+        }
+        QMessageBox #destructiveButton {
+            color: #ffffff;
+            background: #9a4542;
+            border-color: #9a4542;
+        }
+        QMessageBox #destructiveButton:hover {
+            background: #843936;
+            border-color: #843936;
         }
         QDialog#photoViewer {
             background: #171b19;

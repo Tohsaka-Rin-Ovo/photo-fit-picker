@@ -16,25 +16,48 @@ a = Analysis(
     noarchive=False,
 )
 pyz = PYZ(a.pure)
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name="PhotoFitPicker",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=False,
-    icon="assets/app.icns" if sys.platform == "darwin" else "assets/app.ico",
-)
 
 if sys.platform == "darwin":
-    app = BUNDLE(
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="PhotoFitPicker",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        icon="assets/app.icns",
+    )
+    collected = COLLECT(
         exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        name="PhotoFitPicker",
+    )
+    app = BUNDLE(
+        collected,
         name="拾影.app",
         icon="assets/app.icns",
         bundle_identifier="com.photofitpicker.app",
+        version="0.1.0",
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="PhotoFitPicker",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        icon="assets/app.ico",
     )
