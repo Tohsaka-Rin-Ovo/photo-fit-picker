@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+import numpy
 from PIL import Image, ImageFilter, ImageOps, ImageStat
 
 from .feature_cache import FeatureCache
@@ -29,6 +31,11 @@ try:
     import rawpy
 except ImportError:
     rawpy = None
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 
 STANDARD_EXTENSIONS = {
@@ -90,6 +97,8 @@ SUPPORTED_EXTENSIONS = STANDARD_EXTENSIONS | RAW_EXTENSIONS
 MEMORY_HEAVY_EXTENSIONS = RAW_EXTENSIONS | {".heic", ".heif", ".tif", ".tiff"}
 ANALYSIS_IMAGE_MAX_SIZE = 1024
 DUPLICATE_SAMPLE_SIZE = 64 * 1024
+PORTRAIT_IMAGE_MAX_SIZE = 768
+_portrait_detector_state = threading.local()
 
 
 def _first_tag(tags: Mapping[str, Any], *names: str) -> Any:
@@ -369,7 +378,51 @@ def _quality_metrics(image: Image.Image) -> tuple[float, float]:
     return sharpness, exposure
 
 
-def extract_feature(path: Path) -> PhotoRecord:
+def _portrait_detector():  # type: ignore[no-untyped-def]
+    if cv2 is None:
+        raise RuntimeError("人像检测组件不可用，请重新安装应用")
+    detector = getattr(_portrait_detector_state, "detector", None)
+    if detector is None:
+        model_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
+        detector = cv2.CascadeClassifier(str(model_path))
+        if detector.empty():
+            raise RuntimeError("无法载入本地人像检测模型")
+        _portrait_detector_state.detector = detector
+    return detector
+
+
+def _detect_portrait(image: Image.Image) -> bool:
+    if cv2 is None:
+        raise RuntimeError("人像检测组件不可用，请重新安装应用")
+    working = image.convert("RGB")
+    try:
+        working.thumbnail(
+            (PORTRAIT_IMAGE_MAX_SIZE, PORTRAIT_IMAGE_MAX_SIZE),
+            Image.Resampling.LANCZOS,
+        )
+        gray = cv2.cvtColor(numpy.asarray(working), cv2.COLOR_RGB2GRAY)
+        minimum_face = max(24, min(gray.shape[:2]) // 18)
+        faces = _portrait_detector().detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(minimum_face, minimum_face),
+        )
+        return len(faces) > 0
+    finally:
+        working.close()
+
+
+def _detect_portrait_for_record(record: PhotoRecord) -> PhotoRecord:
+    image, _, _, _ = _decoded_image(record.path, record.captured_at)
+    try:
+        record.portrait_detected = _detect_portrait(image)
+    finally:
+        image.close()
+    return record
+
+
+def extract_feature(path: Path, detect_portraits: bool = False) -> PhotoRecord:
     metadata = extract_metadata(path)
     image, width, height, captured_at = _decoded_image(path, metadata.captured_at)
     try:
@@ -377,6 +430,7 @@ def extract_feature(path: Path) -> PhotoRecord:
         average_hash = _average_hash(image)
         signature = _color_signature(image)
         sharpness, exposure = _quality_metrics(image)
+        portrait_detected = _detect_portrait(image) if detect_portraits else None
     finally:
         image.close()
     return PhotoRecord(
@@ -391,6 +445,7 @@ def extract_feature(path: Path) -> PhotoRecord:
         exposure=exposure,
         average_hash=average_hash,
         metadata=metadata,
+        portrait_detected=portrait_detected,
     )
 
 
@@ -399,6 +454,7 @@ def analyze_paths(
     progress: Optional[Callable[[int, int, str], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
     cache: Optional[FeatureCache] = None,
+    detect_portraits: bool = False,
 ) -> tuple[list[PhotoRecord], list[tuple[Path, str]]]:
     if not paths:
         return [], []
@@ -406,36 +462,42 @@ def analyze_paths(
     failures: list[tuple[Path, str]] = []
     total = len(paths)
     cached = cache.load(paths) if cache else {}
-    missing: list[tuple[int, Path]] = []
+    pending: list[tuple[int, Path, Optional[PhotoRecord]]] = []
     for index, path in enumerate(paths):
         record = cached.get(path)
         if record is None:
-            missing.append((index, path))
+            pending.append((index, path, None))
         else:
             records[index] = record
-    completed = total - len(missing)
+            if detect_portraits and record.portrait_detected is None:
+                pending.append((index, path, record))
+    completed = total - len(pending)
     if progress and completed:
         progress(completed, total, f"已复用 {completed} 张照片的分析结果")
-    if not missing:
+    if not pending:
         return [record for record in records if record is not None], []
 
     memory_heavy = any(
         path.suffix.lower() in MEMORY_HEAVY_EXTENSIONS
-        for _, path in missing
+        for _, path, _ in pending
     )
-    worker_limit = 2 if memory_heavy else 4
+    worker_limit = 2 if memory_heavy or detect_portraits else 4
     worker_count = min(
-        len(missing),
+        len(pending),
         max(2, min(worker_limit, (os.cpu_count() or 2) // 2)),
     )
     executor = ThreadPoolExecutor(
         max_workers=worker_count,
         thread_name_prefix="photo-analysis",
     )
-    futures = {
-        executor.submit(extract_feature, path): (index, path)
-        for index, path in missing
-    }
+    futures = {}
+    for index, path, cached_record in pending:
+        future = (
+            executor.submit(extract_feature, path, detect_portraits)
+            if cached_record is None
+            else executor.submit(_detect_portrait_for_record, cached_record)
+        )
+        futures[future] = (index, path)
     new_records: list[PhotoRecord] = []
     try:
         for future in as_completed(futures):

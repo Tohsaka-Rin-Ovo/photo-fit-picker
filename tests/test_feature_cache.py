@@ -3,6 +3,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from PIL import Image
+
 import photo_fit_picker.analysis as analysis_module
 from photo_fit_picker.analysis import analyze_paths
 from photo_fit_picker.feature_cache import FeatureCache
@@ -27,6 +29,7 @@ def make_record(path: Path) -> PhotoRecord:
             model="NIKON Z 8",
             details=(("对焦模式", "AF-C"),),
         ),
+        portrait_detected=True,
     )
 
 
@@ -43,6 +46,7 @@ def test_feature_cache_round_trip_and_file_invalidation() -> None:
         assert restored.metadata.camera_label == "NIKON Z 8"
         assert restored.metadata.captured_at == datetime(2026, 9, 13, 12, 0, 0)
         assert restored.metadata.details == (("对焦模式", "AF-C"),)
+        assert restored.portrait_detected is True
 
         image.write_bytes(b"changed raw bytes with a different size")
         assert cache.load([image]) == {}
@@ -65,3 +69,25 @@ def test_analysis_reuses_cached_features_without_decoding() -> None:
 
         assert len(records) == 1
         assert failures == []
+
+
+def test_analysis_adds_portrait_detection_to_older_cached_features() -> None:
+    with TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        image = root / "photo.jpg"
+        Image.new("RGB", (64, 48), "white").save(image)
+        record = make_record(image)
+        record.portrait_detected = None
+        cache = FeatureCache(root / "features.sqlite3")
+        cache.store([record])
+
+        with patch.object(analysis_module, "_detect_portrait", return_value=True):
+            records, failures = analyze_paths(
+                [image],
+                cache=cache,
+                detect_portraits=True,
+            )
+
+        assert failures == []
+        assert records[0].portrait_detected is True
+        assert cache.load([image])[image].portrait_detected is True

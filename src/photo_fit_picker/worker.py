@@ -35,6 +35,9 @@ class AnalysisWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
+            feature_stage = (
+                "读取特征与人像" if self.options.detect_portraits else "读取特征"
+            )
             grouping_passes = 3 if self.options.detect_exact_duplicates else 1
             total_work = max(1, len(self.paths) * (1 + grouping_passes))
             records, failures = analyze_paths(
@@ -42,10 +45,11 @@ class AnalysisWorker(QObject):
                 progress=lambda current, _total, filename: self.progress.emit(
                     current,
                     total_work,
-                    f"读取特征 · {filename}",
+                    f"{feature_stage} · {filename}",
                 ),
                 cancelled=lambda: self._cancelled,
                 cache=FeatureCache(self.cache_path) if self.cache_path else None,
+                detect_portraits=self.options.detect_portraits,
             )
             if self._cancelled:
                 self.cancelled.emit()

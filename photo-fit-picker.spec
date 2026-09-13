@@ -8,13 +8,34 @@ heif_data, heif_binaries, heif_hidden = collect_all("pillow_heif")
 raw_data, raw_binaries, raw_hidden = collect_all("rawpy")
 qta_data, qta_binaries, qta_hidden = collect_all("qtawesome")
 exif_data, exif_binaries, exif_hidden = collect_all("exifread")
+opencv_data, opencv_binaries, opencv_hidden = collect_all("cv2")
 
 a = Analysis(
     ["run_app.py"],
     pathex=["src"],
-    binaries=heif_binaries + raw_binaries + qta_binaries + exif_binaries,
-    datas=heif_data + raw_data + qta_data + exif_data + [("demo-photos", "demo-photos")],
-    hiddenimports=heif_hidden + raw_hidden + qta_hidden + exif_hidden + ["photo_fit_picker.ui"],
+    binaries=(
+        heif_binaries
+        + raw_binaries
+        + qta_binaries
+        + exif_binaries
+        + opencv_binaries
+    ),
+    datas=(
+        heif_data
+        + raw_data
+        + qta_data
+        + exif_data
+        + opencv_data
+        + [("demo-photos", "demo-photos")]
+    ),
+    hiddenimports=(
+        heif_hidden
+        + raw_hidden
+        + qta_hidden
+        + exif_hidden
+        + opencv_hidden
+        + ["photo_fit_picker.ui"]
+    ),
     noarchive=False,
 )
 pyz = PYZ(a.pure)

@@ -8,18 +8,21 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from photo_fit_picker.models import PhotoGroup, PhotoRecord, ReviewStatus
 from photo_fit_picker.session import ReviewSessionStore
 from photo_fit_picker.ui import (
     CARD_RENDER_BATCH_SIZE,
     MainWindow,
+    PhotoCard,
     ZoomablePhotoArea,
     _clamped_thumbnail_size,
     _filtered_photo_groups,
+    _normalized_sort_mode,
     _normalized_view_mode,
     _photo_grid_columns,
+    _sorted_group_photos,
 )
 
 
@@ -29,6 +32,98 @@ def test_view_preferences_are_normalized() -> None:
     assert _clamped_thumbnail_size("80") == 120
     assert _clamped_thumbnail_size(999) == 320
     assert _clamped_thumbnail_size("invalid") == 268
+    assert _normalized_sort_mode("time") == "time"
+    assert _normalized_sort_mode("unexpected") == "recommended"
+
+
+def test_group_photos_can_be_sorted_by_recommendation_time_and_size() -> None:
+    neutral = tuple([1 / 48] * 48)
+
+    def photo(
+        name: str,
+        minute: int,
+        size: int,
+        sharpness: float,
+        portrait: bool = False,
+    ) -> PhotoRecord:
+        return PhotoRecord(
+            path=Path(name),
+            width=1200,
+            height=800,
+            file_size=size,
+            captured_at=datetime(2026, 1, 1, 12, minute),
+            dhash=minute,
+            color_signature=neutral,
+            sharpness=sharpness,
+            exposure=0.5,
+            portrait_detected=portrait,
+        )
+
+    earliest_and_largest = photo("early.jpg", 1, 300, 0.04)
+    portrait = photo("portrait.jpg", 2, 200, 0.08, True)
+    recommended = photo("best.jpg", 3, 100, 0.2)
+    group = PhotoGroup(1, [portrait, recommended, earliest_and_largest])
+
+    assert _sorted_group_photos(group, "recommended") == [
+        recommended,
+        portrait,
+        earliest_and_largest,
+    ]
+    assert _sorted_group_photos(group, "time") == [
+        earliest_and_largest,
+        portrait,
+        recommended,
+    ]
+    assert _sorted_group_photos(group, "size") == [
+        earliest_and_largest,
+        portrait,
+        recommended,
+    ]
+    assert group.photos == [portrait, recommended, earliest_and_largest]
+
+
+def test_portrait_badge_does_not_overlap_compact_card_controls() -> None:
+    app = QApplication.instance() or QApplication([])
+    image_path = Path("demo-photos/01_lake_clear.jpg").resolve()
+    photo = PhotoRecord(
+        path=image_path,
+        width=1200,
+        height=800,
+        file_size=image_path.stat().st_size,
+        captured_at=datetime(2026, 1, 1),
+        dhash=1,
+        color_signature=tuple([1 / 48] * 48),
+        sharpness=0.1,
+        exposure=0.5,
+        portrait_detected=True,
+    )
+    card = PhotoCard(photo, True, "compact", 120, True)
+    portrait_badge = card.findChild(QLabel, "portraitBadge")
+    recommended_badge = card.findChild(QLabel, "recommendBadge")
+
+    assert portrait_badge is not None
+    assert recommended_badge is not None
+    assert not portrait_badge.geometry().intersects(card.select_box.geometry())
+    assert not recommended_badge.geometry().intersects(card.select_box.geometry())
+    assert not portrait_badge.geometry().intersects(recommended_badge.geometry())
+    card.close()
+
+
+def test_portrait_detection_setting_updates_analysis_options() -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("PortraitDetectionSetting")
+    QSettings().clear()
+    window = MainWindow()
+
+    window.settings_view.portrait_detection_toggle.setChecked(True)
+    window._set_sort_mode("size")
+
+    assert QSettings().value("review/detect_portraits", type=bool) is True
+    assert QSettings().value("view/sort_mode") == "size"
+    assert window.analysis_options.detect_portraits is True
+    window.close()
+    QSettings().clear()
 
 
 def test_grid_columns_follow_view_mode_and_available_width() -> None:

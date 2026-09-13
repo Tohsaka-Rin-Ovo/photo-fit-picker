@@ -46,6 +46,12 @@ def make_photo(name: str, hash_value: int, seconds: int, color: tuple[float, ...
 
 
 class AnalysisTests(unittest.TestCase):
+    @unittest.skipIf(analysis_module.cv2 is None, "OpenCV is not installed")
+    def test_bundled_portrait_detector_model_is_available(self) -> None:
+        detector = analysis_module._portrait_detector()
+
+        self.assertFalse(detector.empty())
+
     def test_extracts_camera_and_shooting_metadata_from_jpeg(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "nikon.jpg"
@@ -200,6 +206,22 @@ class AnalysisTests(unittest.TestCase):
             self.assertGreater(record.file_size, 0)
             self.assertGreater(record.exposure, 0.5)
             self.assertEqual(len(record.color_signature), 48)
+
+    def test_portrait_detection_only_runs_when_enabled(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "portrait.jpg"
+            Image.new("RGB", (640, 480), (128, 160, 192)).save(path)
+            with patch.object(
+                analysis_module,
+                "_detect_portrait",
+                return_value=True,
+            ) as detector:
+                disabled = extract_feature(path)
+                enabled = extract_feature(path, detect_portraits=True)
+
+        self.assertIsNone(disabled.portrait_detected)
+        self.assertTrue(enabled.portrait_detected)
+        self.assertEqual(detector.call_count, 1)
 
     def test_large_image_is_downsampled_without_losing_original_dimensions(self) -> None:
         with TemporaryDirectory() as temporary_directory:

@@ -370,7 +370,7 @@ QListWidget::item:selected {
     background: transparent;
     border: 0;
 }
-#viewModeButton {
+#viewModeButton, #sortModeButton {
     min-width: 34px;
     max-width: 34px;
     min-height: 32px;
@@ -436,6 +436,13 @@ QListWidget::item:selected {
 #recommendBadge {
     color: @amber;
     background: @amber_soft;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 700;
+}
+#portraitBadge {
+    color: @accent_text;
+    background: @accent_soft;
     border-radius: 5px;
     font-size: 11px;
     font-weight: 700;

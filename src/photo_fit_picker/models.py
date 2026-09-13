@@ -35,6 +35,7 @@ class AnalysisOptions:
     sharpness_weight: float = 0.75
     exposure_weight: float = 0.25
     resolution_weight: float = 0.0
+    detect_portraits: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class PhotoRecord:
     exposure: float
     average_hash: int = 0
     metadata: CameraMetadata = field(default_factory=CameraMetadata)
+    portrait_detected: Optional[bool] = None
     status: ReviewStatus = ReviewStatus.PENDING
     group_id: int = -1
     selected: bool = False

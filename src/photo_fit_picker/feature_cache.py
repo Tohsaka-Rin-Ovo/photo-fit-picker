@@ -138,6 +138,7 @@ class FeatureCache:
                 "color_signature": record.color_signature,
                 "sharpness": record.sharpness,
                 "exposure": record.exposure,
+                "portrait_detected": record.portrait_detected,
                 "metadata": metadata,
             },
             ensure_ascii=False,
@@ -166,5 +167,6 @@ class FeatureCache:
             color_signature=tuple(float(value) for value in data["color_signature"]),
             sharpness=float(data["sharpness"]),
             exposure=float(data["exposure"]),
+            portrait_detected=data.get("portrait_detected"),
             metadata=CameraMetadata(**metadata_data),
         )

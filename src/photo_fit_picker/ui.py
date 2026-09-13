@@ -109,6 +109,7 @@ REVIEW_PRESETS = {
 
 VIEW_MODES = {"compact", "large", "list"}
 VIEW_MODE_SIZES = {"compact": 168, "large": 268, "list": 136}
+SORT_MODES = {"recommended", "time", "size"}
 CARD_RENDER_BATCH_SIZE = 24
 
 
@@ -123,6 +124,43 @@ def _clamped_thumbnail_size(value: object) -> int:
     except (TypeError, ValueError):
         size = VIEW_MODE_SIZES["large"]
     return max(120, min(320, size))
+
+
+def _normalized_sort_mode(value: object) -> str:
+    mode = str(value)
+    return mode if mode in SORT_MODES else "recommended"
+
+
+def _sorted_group_photos(
+    group: PhotoGroup,
+    mode: object,
+    include_portraits: bool = True,
+) -> list[PhotoRecord]:
+    normalized = _normalized_sort_mode(mode)
+    if normalized == "time":
+        return sorted(
+            group.photos,
+            key=lambda photo: (photo.captured_at, photo.path.name.casefold()),
+        )
+    if normalized == "size":
+        return sorted(
+            group.photos,
+            key=lambda photo: (
+                -photo.file_size,
+                photo.captured_at,
+                photo.path.name.casefold(),
+            ),
+        )
+    recommended = group.recommended
+    return sorted(
+        group.photos,
+        key=lambda photo: (
+            photo is not recommended,
+            not (include_portraits and photo.portrait_detected is True),
+            photo.captured_at,
+            photo.path.name.casefold(),
+        ),
+    )
 
 
 def _photo_grid_columns(
@@ -469,6 +507,7 @@ class PhotoCard(QFrame):
         recommended: bool,
         view_mode: str = "large",
         thumbnail_size: int = VIEW_MODE_SIZES["large"],
+        show_portrait_label: bool = True,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -524,10 +563,18 @@ class PhotoCard(QFrame):
             badge = QLabel("最佳")
             badge.setObjectName("recommendBadge")
             badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            badge.setFixedSize(50, 26)
+            badge.setFixedSize(34, 24)
             badge.setParent(preview_frame)
             badge.move(10, 10)
             badge.raise_()
+        if show_portrait_label and photo.portrait_detected is True:
+            portrait_badge = QLabel("人像")
+            portrait_badge.setObjectName("portraitBadge")
+            portrait_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            portrait_badge.setFixedSize(34, 24)
+            portrait_badge.setParent(preview_frame)
+            portrait_badge.move(48, 10)
+            portrait_badge.raise_()
 
         self.action_panel = QFrame(preview_frame)
         self.action_panel.setObjectName("cardActions")
@@ -1086,6 +1133,11 @@ class PhotoViewer(QDialog):
             ),
         ]
         rows.extend((label, value) for label, value in optional_rows if value)
+        if (
+            photo.portrait_detected is True
+            and _setting_bool(QSettings(), "review/detect_portraits")
+        ):
+            rows.append(("标记", "人像 · 本地检测到可见人脸"))
         rows.extend(metadata.details)
         return rows
 
@@ -1685,6 +1737,26 @@ class SettingsView(QWidget):
         scope_layout.addLayout(scope_row)
         scope_layout.addWidget(self._divider())
 
+        portrait_row = QHBoxLayout()
+        portrait_row.addWidget(
+            self._text_block(
+                "检测人像标签",
+                "在本机检测清晰可见的人脸；开启会增加分析耗时，首次开启后请重新分析。",
+            ),
+            1,
+        )
+        self.portrait_detection_toggle = SettingsSwitch()
+        self.portrait_detection_toggle.setObjectName("settingsSwitch")
+        self.portrait_detection_toggle.setChecked(
+            _setting_bool(self.preferences, "review/detect_portraits")
+        )
+        self.portrait_detection_toggle.toggled.connect(
+            self._portrait_detection_changed
+        )
+        portrait_row.addWidget(self.portrait_detection_toggle)
+        scope_layout.addLayout(portrait_row)
+        scope_layout.addWidget(self._divider())
+
         new_round_row = QHBoxLayout()
         new_round_row.addWidget(
             self._text_block(
@@ -1921,6 +1993,12 @@ class SettingsView(QWidget):
         )
         self.hide_singletons_toggle.blockSignals(False)
 
+        self.portrait_detection_toggle.blockSignals(True)
+        self.portrait_detection_toggle.setChecked(
+            _setting_bool(self.preferences, "review/detect_portraits")
+        )
+        self.portrait_detection_toggle.blockSignals(False)
+
         gap_minutes = int(self.preferences.value("organize/gap_minutes", 180))
         self.organization_gap.blockSignals(True)
         self.organization_gap.setValue(gap_minutes)
@@ -1980,6 +2058,10 @@ class SettingsView(QWidget):
 
     def _hide_singletons_changed(self, checked: bool) -> None:
         self.preferences.setValue("review/hide_singletons", checked)
+        self.preferences_changed.emit()
+
+    def _portrait_detection_changed(self, checked: bool) -> None:
+        self.preferences.setValue("review/detect_portraits", checked)
         self.preferences_changed.emit()
 
     def _preset_changed(self) -> None:
@@ -2072,6 +2154,7 @@ class MainWindow(QMainWindow):
         self.destination_mode = "source"
         self.view_mode = "large"
         self.thumbnail_size = VIEW_MODE_SIZES["large"]
+        self.sort_mode = "recommended"
         self._load_preferences()
         state_location = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppDataLocation
@@ -2209,6 +2292,10 @@ class MainWindow(QMainWindow):
             resolution_weight=max(
                 0.0, int(self.preferences.value("algorithm/resolution_weight", 0)) / 100.0
             ),
+            detect_portraits=_setting_bool(
+                self.preferences,
+                "review/detect_portraits",
+            ),
         )
         self.destination_mode = str(
             self.preferences.value("folders/destination_mode", "source")
@@ -2221,6 +2308,9 @@ class MainWindow(QMainWindow):
                 "view/thumbnail_size",
                 VIEW_MODE_SIZES[self.view_mode],
             )
+        )
+        self.sort_mode = _normalized_sort_mode(
+            self.preferences.value("view/sort_mode", "recommended")
         )
         custom_destination = str(
             self.preferences.value("folders/custom_destination", "")
@@ -2480,6 +2570,33 @@ class MainWindow(QMainWindow):
         self.card_loading_progress.hide()
         view_layout.addWidget(self.card_loading_progress)
         view_layout.addStretch()
+
+        sort_menu = QMenu(self)
+        self.sort_action_group = QActionGroup(self)
+        self.sort_action_group.setExclusive(True)
+        self.sort_actions: dict[str, QAction] = {}
+        for label, mode in (
+            ("推荐与人像优先", "recommended"),
+            ("拍摄时间（较早优先）", "time"),
+            ("文件大小（较大优先）", "size"),
+        ):
+            action = sort_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(mode == self.sort_mode)
+            action.triggered.connect(
+                lambda checked=False, selected=mode: self._set_sort_mode(selected)
+            )
+            self.sort_action_group.addAction(action)
+            self.sort_actions[mode] = action
+        self.sort_mode_button = FeedbackToolButton()
+        self.sort_mode_button.setObjectName("sortModeButton")
+        self.sort_mode_button.setIconSize(QSize(19, 19))
+        self.sort_mode_button.setAccessibleName("照片排序")
+        self.sort_mode_button.setMenu(sort_menu)
+        self.sort_mode_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        view_layout.addWidget(self.sort_mode_button)
+        self._sync_sort_mode_button()
+
         size_small = QLabel()
         size_small.setPixmap(_icon("image-outline", ICON_MUTED).pixmap(15, 15))
         size_small.setToolTip("较小缩略图")
@@ -3024,9 +3141,20 @@ class MainWindow(QMainWindow):
         self._apply_group_filter()
         photo_count = sum(len(group.photos) for group in groups)
         similar_count = sum(len(group.photos) > 1 for group in groups)
+        portrait_count = sum(
+            photo.portrait_detected is True
+            for group in groups
+            for photo in group.photos
+        )
         restored_text = f"，恢复 {restored} 项审核决定" if restored else ""
+        portrait_text = (
+            f"，标记 {portrait_count} 张人像"
+            if self.analysis_options.detect_portraits
+            else ""
+        )
         self.statusBar().showMessage(
-            f"分析完成：{photo_count} 张照片，{similar_count} 个相似组{restored_text}",
+            f"分析完成：{photo_count} 张照片，{similar_count} 个相似组"
+            f"{portrait_text}{restored_text}",
             8000,
         )
         self._save_session_now()
@@ -3124,6 +3252,22 @@ class MainWindow(QMainWindow):
         self.view_mode_button.setIcon(_icon(icons[self.view_mode]))
         self.view_mode_button.setToolTip(f"照片视图：{labels[self.view_mode]}")
 
+    def _sync_sort_mode_button(self) -> None:
+        labels = {
+            "recommended": "推荐与人像优先",
+            "time": "拍摄时间（较早优先）",
+            "size": "文件大小（较大优先）",
+        }
+        self.sort_mode_button.setIcon(_icon("sort-variant"))
+        self.sort_mode_button.setToolTip(f"照片排序：{labels[self.sort_mode]}")
+
+    def _set_sort_mode(self, mode: str) -> None:
+        self.sort_mode = _normalized_sort_mode(mode)
+        self.preferences.setValue("view/sort_mode", self.sort_mode)
+        self.sort_actions[self.sort_mode].setChecked(True)
+        self._sync_sort_mode_button()
+        self._rerender_current_group()
+
     def _set_view_mode(self, mode: str) -> None:
         mode = _normalized_view_mode(mode)
         self.view_mode = mode
@@ -3178,7 +3322,7 @@ class MainWindow(QMainWindow):
             else Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
         self.photo_grid.setColumnStretch(0, 1 if self.view_mode == "list" else 0)
-        self._pending_card_photos = list(group.photos)
+        self._pending_card_photos = self._ordered_group_photos(group)
         self._card_render_recommended = recommended
         generation = self._card_render_generation
         self.card_loading_progress.setRange(0, len(group.photos))
@@ -3200,6 +3344,7 @@ class MainWindow(QMainWindow):
                 photo is self._card_render_recommended,
                 self.view_mode,
                 self.thumbnail_size,
+                self.analysis_options.detect_portraits,
             )
             card.status_changed.connect(self._review_changed)
             card.selection_changed.connect(self._selection_changed)
@@ -3287,6 +3432,13 @@ class MainWindow(QMainWindow):
             return self.visible_groups[row]
         return None
 
+    def _ordered_group_photos(self, group: PhotoGroup) -> list[PhotoRecord]:
+        return _sorted_group_photos(
+            group,
+            self.sort_mode,
+            self.analysis_options.detect_portraits,
+        )
+
     def _set_current_group(self, status: ReviewStatus) -> None:
         group = self._current_group()
         if not group:
@@ -3349,7 +3501,14 @@ class MainWindow(QMainWindow):
         group = self._current_group()
         if not group:
             return
-        viewer = PhotoViewer(group, group.photos.index(photo), self)
+        ordered_group = PhotoGroup(
+            id=group.id,
+            photos=self._ordered_group_photos(group),
+            sharpness_weight=group.sharpness_weight,
+            exposure_weight=group.exposure_weight,
+            resolution_weight=group.resolution_weight,
+        )
+        viewer = PhotoViewer(ordered_group, ordered_group.photos.index(photo), self)
         viewer.status_changed.connect(self._review_changed)
         viewer.trash_requested.connect(self._confirm_trash)
         viewer.exec()
