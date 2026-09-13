@@ -60,7 +60,17 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -e ".[dev]"
       - name: Run tests
-        run: python -m pytest
+        shell: pwsh
+        run: |
+          $testOutput = python -m pytest --tb=short 2>&1
+          $testExitCode = $LASTEXITCODE
+          $testOutput | Write-Output
+          if ($testExitCode -ne 0) {
+            $message = ($testOutput | Out-String).Trim()
+            $message = $message -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+            Write-Output "::error title=Windows test failure::$message"
+            exit $testExitCode
+          }
       - name: Build app
         run: python -m PyInstaller --noconfirm --clean photo-fit-picker.spec
       - name: Ensure Inno Setup is available
