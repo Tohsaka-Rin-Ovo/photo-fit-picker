@@ -30,6 +30,7 @@ import {
   Square,
   Sun,
   Trash2,
+  Undo2,
   UserRound,
   X,
   ZoomIn,
@@ -455,6 +456,7 @@ function SettingsPage({ preferences, destination, section, onSection, onChange, 
   return (
     <div className="settings-page">
       <aside className="settings-sidebar">
+        <div className="window-drag" data-tauri-drag-region />
         <button className="back-button" type="button" onClick={onClose}><ArrowLeft size={18} />返回照片</button>
         <nav>
           {navigation.map(([key, label, icon]) => (
@@ -552,6 +554,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [demoMode, setDemoMode] = useState(false);
+  const [lastMoveStatuses, setLastMoveStatuses] = useState<Map<string, ReviewStatus> | null>(null);
 
   useEffect(() => {
     localStorage.setItem("photo-fit-picker.preferences", JSON.stringify(preferences));
@@ -684,6 +687,7 @@ function App() {
   const moveSelected = async () => {
     if (!selected.size) return;
     if (demoMode) {
+      setLastMoveStatuses(new Map(selectedPhotos.map((photo) => [photo.id, photo.status])));
       updateLocalStatus([...selected], "moved");
       setNotice("演示模式：已模拟移动照片");
       return;
@@ -697,11 +701,38 @@ function App() {
     }
     setBusy(true);
     try {
+      setLastMoveStatuses(new Map(selectedPhotos.map((photo) => [photo.id, photo.status])));
       await engine.move([...selected], target);
       updateLocalStatus([...selected], "moved");
       setNotice("照片已移动，可在文件夹设置中查看目标位置");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "移动失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const undoMove = async () => {
+    if (!lastMoveStatuses || (!demoMode && !destination)) return;
+    setBusy(true);
+    try {
+      if (!demoMode) await engine.undo(destination);
+      setGroups((current) => current.map((group) => {
+        const nextPhotos = group.photos.map((photo) => {
+          const previous = lastMoveStatuses.get(photo.id);
+          return previous ? { ...photo, status: previous } : photo;
+        });
+        return {
+          ...group,
+          photos: nextPhotos,
+          reviewed: nextPhotos.every((photo) => photo.status !== "pending"),
+          kept_count: nextPhotos.filter((photo) => photo.status === "kept").length,
+        };
+      }));
+      setLastMoveStatuses(null);
+      setNotice("已撤销最近一次移动");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "撤销移动失败");
     } finally {
       setBusy(false);
     }
@@ -832,6 +863,7 @@ function App() {
                 <IconButton label="列表" active={preferences.viewMode === "list"} onClick={() => setPreferences({ ...preferences, viewMode: "list" })}><List size={19} /></IconButton>
                 {preferences.viewMode !== "list" && <input className="size-slider" aria-label="缩略图大小" type="range" min="150" max="330" value={preferences.thumbnailSize} onChange={(event) => setPreferences({ ...preferences, thumbnailSize: Number(event.target.value) })} />}
               </div>
+              {lastMoveStatuses && (demoMode || destination) && <IconButton label="撤销最近一次移动" disabled={busy} onClick={undoMove}><Undo2 size={18} /></IconButton>}
               <IconButton label="开始新一轮" onClick={() => setConfirmAction("restart")}><RotateCcw size={18} /></IconButton>
             </div>
           )}

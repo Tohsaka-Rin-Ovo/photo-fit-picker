@@ -2,6 +2,21 @@
 
 一个本地运行的 Windows / macOS 照片初筛工具。它会读取照片的拍摄时间和视觉特征，把连拍、同机位的近似照片整理成组，再由用户逐组确认保留项。
 
+## 0.8 桌面端预览
+
+`rewrite/tauri-react` 分支正在把界面迁移到 Tauri + React。照片分析、RAW 解码、EXIF 读取和安全文件操作继续由 Python 本地引擎负责，macOS 与 Windows 使用同一套前端。稳定版 `v0.7.0` 暂不受影响。
+
+预览版目前包含：
+
+- 面向大量照片的虚拟滚动网格，以及小图、大图、文件列表三种视图。
+- 推荐、时间、文件大小排序，人像与推荐标签，多选和批量保留、排除、移动、回收站操作。
+- 大图详情、适合窗口、100% 查看、分级缩放和拍摄参数检查器。
+- 占满工作区的设置页面，包含外观、文件夹、筛选算法、实验功能和后续整理计划。
+- 明亮、深色与 KOOK 绿三套统一主题；不会因深色模式留下明亮标题遮罩。
+- 分析进度、取消、操作反馈、新一轮筛选和强制二次确认的回收站流程。
+
+预览分支推送后，GitHub Actions 中的 `Build Tauri preview` 会分别生成 macOS DMG 与 Windows 安装程序。验证通过前不会覆盖稳定版 Release。
+
 ## 下载
 
 前往 [GitHub Releases](https://github.com/Tohsaka-Rin-Ovo/photo-fit-picker/releases) 下载：
@@ -69,6 +84,19 @@ source .venv/bin/activate              # Windows: .venv\Scripts\activate
 python -m pip install -e .
 python -m photo_fit_picker.main
 ```
+
+运行 0.8 React 前端需要 Node.js 22、pnpm 10 和 Rust stable：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+cd desktop
+pnpm install
+PHOTO_FIT_PICKER_PYTHON=../.venv/bin/python pnpm tauri dev
+```
+
+网页布局预览可使用 `pnpm dev` 并点击“试用演示照片”。浏览器预览不会读取本机文件夹；真实导入、移动和回收站功能只在 Tauri 桌面端启用。
 
 ## 使用流程
 

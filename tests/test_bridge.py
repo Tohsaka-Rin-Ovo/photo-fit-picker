@@ -40,6 +40,10 @@ def test_engine_analyzes_and_serves_thumbnail(tmp_path: Path) -> None:
     assert thumbnail.is_file()
     assert thumbnail.read_bytes().startswith(b"\xff\xd8")
 
+    compact_thumbnail = engine.thumbnail(photo_id, maximum=160)
+    with Image.open(compact_thumbnail) as preview:
+        assert max(preview.size) == 160
+
 
 def test_engine_persists_review_and_requires_trash_confirmation(tmp_path: Path) -> None:
     source = tmp_path / "photos"
@@ -61,6 +65,27 @@ def test_engine_persists_review_and_requires_trash_confirmation(tmp_path: Path) 
         assert "再次确认" in str(exc)
     else:
         raise AssertionError("trash must require explicit confirmation")
+    assert image_path.is_file()
+
+
+def test_engine_undo_restores_record_path_and_status(tmp_path: Path) -> None:
+    source = tmp_path / "photos"
+    destination = tmp_path / "selected"
+    source.mkdir()
+    image_path = source / "photo.jpg"
+    Image.new("RGB", (160, 120), (80, 90, 100)).save(image_path)
+    engine = EngineState(tmp_path / "state")
+    snapshot = _wait_for_job(engine, engine.start_analysis(source, {}).id)
+    photo_id = snapshot["groups"][0]["photos"][0]["id"]
+
+    engine.update_review([{"id": photo_id, "status": "kept"}])
+    assert engine.move([photo_id], destination)["moved_files"] == 1
+    assert engine.records[photo_id].status.value == "moved"
+    assert engine.records[photo_id].path.parent == destination.resolve()
+
+    assert engine.undo(destination)["restored_files"] == 1
+    assert engine.records[photo_id].status.value == "kept"
+    assert engine.records[photo_id].path == image_path.resolve()
     assert image_path.is_file()
 
 

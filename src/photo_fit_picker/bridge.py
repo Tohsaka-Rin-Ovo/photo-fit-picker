@@ -290,6 +290,8 @@ class EngineState:
         if not photos:
             raise ValueError("没有选择照片")
         moved = move_photos(photos, destination.expanduser().resolve())
+        if self.source:
+            self.session_store.save(self.source, self.records.values())
         return {
             "moved_files": len(moved),
             "entries": [asdict(entry) for entry in moved],
@@ -304,10 +306,25 @@ class EngineState:
         trashed: list[str] = []
         for photo in photos:
             trashed.append(str(move_photo_to_trash(photo)))
+        if self.source:
+            self.session_store.save(self.source, self.records.values())
         return {"trashed_files": len(trashed), "paths": trashed}
 
     def undo(self, destination: Path) -> dict[str, object]:
         restored, errors = undo_last_move(destination.expanduser().resolve())
+        with self.lock:
+            by_path = {record.path.resolve(): record for record in self.records.values()}
+            for entry in restored:
+                record = by_path.get(Path(entry.destination).resolve())
+                if record is None:
+                    continue
+                record.path = Path(entry.source).resolve()
+                try:
+                    record.status = ReviewStatus(entry.previous_status)
+                except ValueError:
+                    record.status = ReviewStatus.PENDING
+            if self.source:
+                self.session_store.save(self.source, self.records.values())
         return {
             "restored_files": len(restored),
             "errors": errors,
