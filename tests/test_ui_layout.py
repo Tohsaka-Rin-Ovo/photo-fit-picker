@@ -1,15 +1,17 @@
 import os
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
-from photo_fit_picker.models import PhotoGroup, PhotoRecord
+from photo_fit_picker.models import PhotoGroup, PhotoRecord, ReviewStatus
+from photo_fit_picker.session import ReviewSessionStore
 from photo_fit_picker.ui import (
     CARD_RENDER_BATCH_SIZE,
     MainWindow,
@@ -141,4 +143,116 @@ def test_large_photo_group_is_rendered_in_responsive_batches() -> None:
         QTest.qWait(20)
     assert len(window.cards) == len(photos)
     assert not window.card_loading_progress.isVisible()
+    window.close()
+
+
+def test_new_review_round_resets_decisions_and_persisted_session(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("NewReviewRound")
+    QSettings().clear()
+    neutral = tuple([1 / 48] * 48)
+    statuses = [
+        ReviewStatus.KEPT,
+        ReviewStatus.REJECTED,
+        ReviewStatus.MOVED,
+        ReviewStatus.TRASHED,
+    ]
+    photos = []
+    for index, status in enumerate(statuses):
+        path = tmp_path / f"photo-{index}.jpg"
+        pixmap = QPixmap(8, 8)
+        pixmap.fill(QColor("white"))
+        assert pixmap.save(str(path), "JPG")
+        photos.append(
+            PhotoRecord(
+                path=path,
+                width=8,
+                height=8,
+                file_size=path.stat().st_size,
+                captured_at=datetime(2026, 1, 1),
+                dhash=index,
+                color_signature=neutral,
+                sharpness=0.1,
+                exposure=0.5,
+                status=status,
+                selected=True,
+            )
+        )
+
+    window = MainWindow()
+    window.source_folder = tmp_path
+    window.session_store = ReviewSessionStore(tmp_path / "sessions")
+    window.groups = [PhotoGroup(1, photos)]
+    window.group_filter.setCurrentIndex(window.group_filter.findData("all"))
+    window._save_session_now()
+    window.root_stack.setCurrentWidget(window.settings_view)
+
+    with patch(
+        "photo_fit_picker.ui.QMessageBox.question",
+        return_value=QMessageBox.StandardButton.Yes,
+    ):
+        window._confirm_new_round()
+
+    assert [photo.status for photo in photos] == [
+        ReviewStatus.PENDING,
+        ReviewStatus.PENDING,
+        ReviewStatus.MOVED,
+        ReviewStatus.TRASHED,
+    ]
+    assert all(not photo.selected for photo in photos)
+    assert window.group_filter.currentData() == "pending"
+    assert window.root_stack.currentWidget() is window.workspace
+    assert not window.new_round_button.isEnabled()
+    assert not window.settings_view.new_round_button.isEnabled()
+
+    restored = [
+        PhotoRecord(
+            path=photo.path,
+            width=photo.width,
+            height=photo.height,
+            file_size=photo.file_size,
+            captured_at=photo.captured_at,
+            dhash=photo.dhash,
+            color_signature=photo.color_signature,
+            sharpness=photo.sharpness,
+            exposure=photo.exposure,
+        )
+        for photo in photos
+    ]
+    assert window.session_store.restore(tmp_path, restored) == 0
+    assert all(photo.status == ReviewStatus.PENDING for photo in restored)
+    window.close()
+    QSettings().clear()
+
+
+def test_cancelling_new_review_round_keeps_current_state() -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("CancelNewReviewRound")
+    neutral = tuple([1 / 48] * 48)
+    photo = PhotoRecord(
+        path=Path("unchanged.jpg"),
+        width=1200,
+        height=800,
+        file_size=100,
+        captured_at=datetime(2026, 1, 1),
+        dhash=1,
+        color_signature=neutral,
+        sharpness=0.1,
+        exposure=0.5,
+        status=ReviewStatus.KEPT,
+        selected=True,
+    )
+    window = MainWindow()
+    window.groups = [PhotoGroup(1, [photo])]
+
+    with patch(
+        "photo_fit_picker.ui.QMessageBox.question",
+        return_value=QMessageBox.StandardButton.Cancel,
+    ):
+        window._confirm_new_round()
+
+    assert photo.status == ReviewStatus.KEPT
+    assert photo.selected
     window.close()

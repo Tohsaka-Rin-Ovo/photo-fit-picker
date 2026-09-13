@@ -1369,6 +1369,7 @@ class SettingsView(QWidget):
     back_requested = Signal()
     source_requested = Signal()
     reanalyze_requested = Signal()
+    new_round_requested = Signal()
     preferences_changed = Signal()
 
     def __init__(
@@ -1682,6 +1683,22 @@ class SettingsView(QWidget):
         )
         scope_row.addWidget(self.hide_singletons_toggle)
         scope_layout.addLayout(scope_row)
+        scope_layout.addWidget(self._divider())
+
+        new_round_row = QHBoxLayout()
+        new_round_row.addWidget(
+            self._text_block(
+                "重新开始筛选",
+                "清空当前保留与排除标记，复用已有分析结果。",
+            ),
+            1,
+        )
+        self.new_round_button = FeedbackButton("开始新一轮")
+        self.new_round_button.setObjectName("settingsActionButton")
+        self.new_round_button.setIcon(_icon("restart", ICON_MUTED))
+        self.new_round_button.clicked.connect(self.new_round_requested.emit)
+        new_round_row.addWidget(self.new_round_button)
+        scope_layout.addLayout(new_round_row)
         layout.addWidget(scope_group)
 
         self.reanalyze_button = FeedbackButton("重新分析照片")
@@ -1859,8 +1876,14 @@ class SettingsView(QWidget):
                 str(source_folder) if source_folder else "尚未选择照片文件夹"
             )
 
-    def set_analysis_available(self, has_source: bool, is_running: bool) -> None:
+    def set_analysis_available(
+        self,
+        has_source: bool,
+        is_running: bool,
+        can_start_new_round: bool = False,
+    ) -> None:
         self.reanalyze_button.setEnabled(has_source and not is_running)
+        self.new_round_button.setEnabled(can_start_new_round and not is_running)
         self.change_source_button.setEnabled(not is_running)
 
     def refresh_preferences(self) -> None:
@@ -2128,6 +2151,7 @@ class MainWindow(QMainWindow):
         self.settings_view.back_requested.connect(self._close_settings)
         self.settings_view.source_requested.connect(self._choose_source_from_settings)
         self.settings_view.reanalyze_requested.connect(self._reanalyze_from_settings)
+        self.settings_view.new_round_requested.connect(self._confirm_new_round)
         self.settings_view.preferences_changed.connect(self._settings_changed)
         self.root_stack.addWidget(self.settings_view)
         self.organization_view = OrganizationView(self)
@@ -2424,6 +2448,15 @@ class MainWindow(QMainWindow):
         self.group_more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         toolbar.addWidget(self.group_more_button)
 
+        self.new_round_button = FeedbackToolButton()
+        self.new_round_button.setObjectName("toolbarIconButton")
+        self.new_round_button.setIcon(_icon("restart"))
+        self.new_round_button.setIconSize(QSize(19, 19))
+        self.new_round_button.setToolTip("开始新一轮筛选")
+        self.new_round_button.setAccessibleName("开始新一轮筛选")
+        self.new_round_button.clicked.connect(self._confirm_new_round)
+        toolbar.addWidget(self.new_round_button)
+
         toolbar.addWidget(self.undo_button)
 
         self.recommend_button = FeedbackButton("保留最佳并继续")
@@ -2684,6 +2717,7 @@ class MainWindow(QMainWindow):
         self.settings_view.set_analysis_available(
             self.source_folder is not None,
             busy,
+            self._has_review_decisions(),
         )
         self.progress.setVisible(busy)
         self.cancel_analysis_button.setVisible(busy)
@@ -2715,6 +2749,7 @@ class MainWindow(QMainWindow):
         self.settings_view.set_analysis_available(
             self.source_folder is not None,
             self.analysis_thread is not None and self.analysis_thread.isRunning(),
+            self._has_review_decisions(),
         )
         self.settings_button.setChecked(True)
         self.statusBar().hide()
@@ -3203,6 +3238,9 @@ class MainWindow(QMainWindow):
         self.recommend_button.setEnabled(
             has_group and self.visible_groups[row].recommended is not None
         )
+        can_start_new_round = self._has_review_decisions()
+        self.new_round_button.setEnabled(can_start_new_round)
+        self.settings_view.new_round_button.setEnabled(can_start_new_round)
 
     def _show_previous_group(self) -> None:
         row = self.group_list.currentRow()
@@ -3263,6 +3301,12 @@ class MainWindow(QMainWindow):
     def _all_photos(self) -> list[PhotoRecord]:
         return [photo for group in self.groups for photo in group.photos]
 
+    def _has_review_decisions(self) -> bool:
+        return any(
+            photo.status in {ReviewStatus.KEPT, ReviewStatus.REJECTED}
+            for photo in self._all_photos()
+        )
+
     def _selected_photos(self) -> list[PhotoRecord]:
         return [photo for photo in self._all_photos() if photo.selected]
 
@@ -3297,6 +3341,7 @@ class MainWindow(QMainWindow):
         for card in self.cards:
             card.sync_status()
         self._refresh_group_labels()
+        self._update_group_navigation()
         self._update_summary()
         self._schedule_session_save()
 
@@ -3342,8 +3387,55 @@ class MainWindow(QMainWindow):
         group = self._current_group()
         if group and row >= 0:
             self.group_list.item(row).setText(self._group_label(group))
+        self._update_group_navigation()
         self._update_summary()
         self._schedule_session_save()
+
+    def _confirm_new_round(self) -> None:
+        resettable = [
+            photo
+            for photo in self._all_photos()
+            if photo.status in {ReviewStatus.KEPT, ReviewStatus.REJECTED}
+        ]
+        if not resettable:
+            QMessageBox.information(
+                self,
+                "无需开始新一轮",
+                "当前还没有保留或排除标记。",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "开始新一轮筛选？",
+            f"将清空 {len(resettable)} 张照片的保留与排除标记，并取消所有勾选。\n\n"
+            "已有图像分析结果会继续复用；不会移动或删除照片。\n"
+            "已移动或已进入回收站的照片不受影响。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        for photo in self._all_photos():
+            photo.selected = False
+            if photo.status in {ReviewStatus.KEPT, ReviewStatus.REJECTED}:
+                photo.status = ReviewStatus.PENDING
+
+        pending_index = self.group_filter.findData("pending")
+        self.group_filter.blockSignals(True)
+        self.group_filter.setCurrentIndex(max(0, pending_index))
+        self.group_filter.blockSignals(False)
+        if self.root_stack.currentWidget() is self.settings_view:
+            self.settings_button.setChecked(False)
+            self.root_stack.setCurrentWidget(self.workspace)
+            self.statusBar().show()
+        self._clear_selection()
+        self._apply_group_filter()
+        self._save_session_now()
+        self.statusBar().showMessage(
+            f"已开始新一轮筛选，共 {len(resettable)} 张照片恢复为待审核",
+            8000,
+        )
 
     def _refresh_group_labels(self) -> None:
         for row, group in enumerate(self.visible_groups):
