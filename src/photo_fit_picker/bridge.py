@@ -11,7 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
 
@@ -428,7 +428,12 @@ class EngineRequestHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/thumbnails/"):
                 photo_id = parsed.path.removeprefix("/api/thumbnails/")
-                thumbnail = self.engine.thumbnail(photo_id)
+                query = parse_qs(parsed.query)
+                try:
+                    maximum = int(query.get("max", ["720"])[0])
+                except (TypeError, ValueError):
+                    maximum = 720
+                thumbnail = self.engine.thumbnail(photo_id, maximum)
                 content = thumbnail.read_bytes()
                 self.send_response(HTTPStatus.OK)
                 self._cors_headers()

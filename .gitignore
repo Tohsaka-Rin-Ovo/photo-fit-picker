@@ -7,3 +7,8 @@ __pycache__/
 build/
 dist/
 *.spec.bak
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/binaries/*
+!desktop/src-tauri/binaries/.gitkeep

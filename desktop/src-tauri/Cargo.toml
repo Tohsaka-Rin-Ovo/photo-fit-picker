@@ -1,0 +1,20 @@
+[package]
+name = "photo-fit-picker-desktop"
+version = "0.8.0-alpha.1"
+description = "拾影照片筛选桌面客户端"
+authors = ["Photo Fit Picker contributors"]
+edition = "2021"
+
+[lib]
+name = "photo_fit_picker_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+uuid = { version = "1", features = ["v4"] }
