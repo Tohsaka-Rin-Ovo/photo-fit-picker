@@ -1,6 +1,6 @@
 [package]
 name = "photo-fit-picker-desktop"
-version = "0.8.0-alpha.1"
+version = "0.8.0-alpha.2"
 description = "拾影照片筛选桌面客户端"
 authors = ["Photo Fit Picker contributors"]
 edition = "2021"

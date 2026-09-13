@@ -18,6 +18,7 @@ import {
   Leaf,
   List,
   ListChecks,
+  LogOut,
   Maximize2,
   Moon,
   MoveRight,
@@ -81,7 +82,13 @@ const DEFAULT_PREFERENCES: Preferences = {
 };
 
 type SettingsSection = "general" | "folders" | "analysis" | "experiments" | "about";
-type ConfirmAction = "trash" | "restart" | null;
+type ConfirmAction = "trash" | "restart" | "end" | null;
+
+interface MoveUndoState {
+  statuses: Map<string, ReviewStatus>;
+  destination: string;
+  photoCount: number;
+}
 
 function loadPreferences(): Preferences {
   try {
@@ -532,7 +539,7 @@ function SettingsPage({ preferences, destination, section, onSection, onChange, 
           {section === "about" && (
             <section className="settings-section about-section">
               <div className="about-mark"><ImageIcon size={32} /></div>
-              <h2>拾影</h2><p>本地优先的照片筛选工作台</p><span>0.8.0-alpha.1 · Tauri + React</span>
+              <h2>拾影</h2><p>本地优先的照片筛选工作台</p><span>0.8.0-alpha.2 · Tauri + React</span>
               <div className="safety-note"><ShieldCheck size={20} /><div><strong>只在本机处理</strong><p>图片内容和相机参数不会上传。RAW 文件只读取预览与元数据，原文件不会被改写。</p></div></div>
             </section>
           )}
@@ -557,7 +564,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [demoMode, setDemoMode] = useState(false);
-  const [lastMoveStatuses, setLastMoveStatuses] = useState<Map<string, ReviewStatus> | null>(null);
+  const [lastMove, setLastMove] = useState<MoveUndoState | null>(null);
 
   useEffect(() => {
     localStorage.setItem("photo-fit-picker.preferences", JSON.stringify(preferences));
@@ -625,11 +632,21 @@ function App() {
         setGroups(nextGroups);
         setActiveGroupId(nextGroups.find((group) => !preferences.hideSingletons || group.count > 1)?.id || null);
         setSelected(new Set());
-        setNotice(`已整理 ${nextGroups.reduce((sum, group) => sum + group.count, 0)} 张照片`);
+        setNotice(`已分析 ${nextGroups.reduce((sum, group) => sum + group.count, 0)} 张照片，相似照片已分组`);
         return;
       }
       if (snapshot.state === "failed" || snapshot.state === "cancelled") {
-        if (snapshot.state === "failed") setNotice(snapshot.error || "分析失败");
+        if (snapshot.state === "failed") {
+          setNotice(snapshot.error || "分析失败");
+        } else {
+          setJob(null);
+          setGroups([]);
+          setActiveGroupId(null);
+          setSelected(new Set());
+          setSource("");
+          setDemoMode(false);
+          setNotice("已停止分析，照片没有发生任何变化");
+        }
         return;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 260));
@@ -687,10 +704,38 @@ function App() {
     }
   };
 
+  const resetWorkspace = (message: string) => {
+    setGroups([]);
+    setActiveGroupId(null);
+    setSelected(new Set());
+    setSource("");
+    setJob(null);
+    setDetail(null);
+    setDemoMode(false);
+    setLastMove(null);
+    setNotice(message);
+  };
+
+  const endSession = () => {
+    setConfirmAction(null);
+    resetWorkspace("已结束本次整理，照片文件和筛选记录均已保留");
+  };
+
+  const cancelAnalysis = async () => {
+    if (!job || job.id === "starting") return;
+    try {
+      await engine.cancel(job.id);
+      setNotice("正在停止本次分析…");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法停止分析");
+    }
+  };
+
   const moveSelected = async () => {
     if (!selected.size) return;
+    const previousStatuses = new Map(selectedPhotos.map((photo) => [photo.id, photo.status]));
     if (demoMode) {
-      setLastMoveStatuses(new Map(selectedPhotos.map((photo) => [photo.id, photo.status])));
+      setLastMove({ statuses: previousStatuses, destination: "演示照片", photoCount: selected.size });
       updateLocalStatus([...selected], "moved");
       setNotice("演示模式：已模拟移动照片");
       return;
@@ -704,10 +749,10 @@ function App() {
     }
     setBusy(true);
     try {
-      setLastMoveStatuses(new Map(selectedPhotos.map((photo) => [photo.id, photo.status])));
       await engine.move([...selected], target);
+      setLastMove({ statuses: previousStatuses, destination: target, photoCount: selected.size });
       updateLocalStatus([...selected], "moved");
-      setNotice("照片已移动，可在文件夹设置中查看目标位置");
+      setNotice("照片已移动，可随时撤销本次移动");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "移动失败");
     } finally {
@@ -715,14 +760,25 @@ function App() {
     }
   };
 
-  const undoMove = async () => {
-    if (!lastMoveStatuses || (!demoMode && !destination)) return;
+  const undoMove = async (endAfterUndo = false) => {
+    if (!lastMove) return;
+    setConfirmAction(null);
     setBusy(true);
     try {
-      if (!demoMode) await engine.undo(destination);
+      const result = demoMode
+        ? { restored_files: lastMove.photoCount, errors: [] as string[] }
+        : await engine.undo(lastMove.destination);
+      if (result.errors.length) {
+        setNotice(`已恢复 ${result.restored_files} 个文件，另有 ${result.errors.length} 个文件需要手动检查`);
+        return;
+      }
+      if (!result.restored_files) {
+        setNotice("没有找到可撤销的移动记录");
+        return;
+      }
       setGroups((current) => current.map((group) => {
         const nextPhotos = group.photos.map((photo) => {
-          const previous = lastMoveStatuses.get(photo.id);
+          const previous = lastMove.statuses.get(photo.id);
           return previous ? { ...photo, status: previous } : photo;
         });
         return {
@@ -732,8 +788,12 @@ function App() {
           kept_count: nextPhotos.filter((photo) => photo.status === "kept").length,
         };
       }));
-      setLastMoveStatuses(null);
-      setNotice("已撤销最近一次移动");
+      setLastMove(null);
+      if (endAfterUndo) {
+        resetWorkspace("已撤销本次移动并结束整理，照片已回到原文件夹");
+      } else {
+        setNotice("已撤销本次移动，照片已回到原文件夹");
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "撤销移动失败");
     } finally {
@@ -846,6 +906,7 @@ function App() {
         </nav>
         <div className="sidebar-footer">
           {groups.length > 0 && <div className="review-progress"><div><span>本轮进度</span><strong>{reviewed} / {total}</strong></div><progress value={reviewed} max={Math.max(1, total)} /></div>}
+          {groups.length > 0 && <button className="sidebar-end-button" type="button" onClick={() => setConfirmAction("end")}><LogOut size={18} /><span>结束本次整理</span></button>}
           <button type="button" onClick={() => setPage("settings")}><Settings size={18} /><span>设置</span></button>
         </div>
       </aside>
@@ -866,11 +927,17 @@ function App() {
                 <IconButton label="列表" active={preferences.viewMode === "list"} onClick={() => setPreferences({ ...preferences, viewMode: "list" })}><List size={19} /></IconButton>
                 {preferences.viewMode !== "list" && <input className="size-slider" aria-label="缩略图大小" type="range" min="150" max="330" value={preferences.thumbnailSize} onChange={(event) => setPreferences({ ...preferences, thumbnailSize: Number(event.target.value) })} />}
               </div>
-              {lastMoveStatuses && (demoMode || destination) && <IconButton label="撤销最近一次移动" disabled={busy} onClick={undoMove}><Undo2 size={18} /></IconButton>}
               <IconButton label="开始新一轮" onClick={() => setConfirmAction("restart")}><RotateCcw size={18} /></IconButton>
             </div>
           )}
         </header>
+
+        {lastMove && (
+          <section className="move-undo-bar" aria-live="polite">
+            <div><Undo2 size={17} /><p><strong>已移动 {lastMove.photoCount} 张照片</strong><span>不想保留这次文件整理，可以恢复到原文件夹。</span></p></div>
+            <button className="text-action" type="button" disabled={busy} onClick={() => void undoMove()}><Undo2 size={16} />撤销本次移动</button>
+          </section>
+        )}
 
         {job && (job.state === "queued" || job.state === "running") ? (
           <section className="analysis-state">
@@ -878,7 +945,7 @@ function App() {
             <span className="eyebrow">本地分析</span><h2>{job.detail}</h2>
             <p>{job.total ? `${job.current} / ${job.total}` : "正在准备图片读取器"}</p>
             <div className="large-progress"><span style={{ width: `${Math.max(4, progress)}%` }} /></div>
-            <button className="button secondary" type="button" onClick={() => job.id !== "starting" && engine.cancel(job.id)}><Square size={15} />取消</button>
+            <button className="button secondary" type="button" disabled={job.id === "starting"} onClick={() => void cancelAnalysis()}><Square size={15} />停止分析</button>
           </section>
         ) : activeGroup ? (
           <>
@@ -927,10 +994,14 @@ function App() {
       {confirmAction && (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setConfirmAction(null)}>
           <div className="confirm-dialog" role="alertdialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-            <span className={`dialog-icon${confirmAction === "trash" ? " is-danger" : ""}`}>{confirmAction === "trash" ? <Trash2 size={22} /> : <RotateCcw size={22} />}</span>
-            <h2>{confirmAction === "trash" ? `将 ${selected.size} 张照片移到回收站？` : "开始新一轮筛选？"}</h2>
-            <p>{confirmAction === "trash" ? "照片会进入系统回收站，拾影不会永久删除文件。你可以之后从系统回收站恢复。" : "所有保留和排除标记会恢复为待筛选。照片文件与分析缓存不会改变。"}</p>
-            <div className="dialog-actions"><button className="button secondary" type="button" onClick={() => setConfirmAction(null)}>取消</button><button className={`button ${confirmAction === "trash" ? "danger" : "primary"}`} type="button" onClick={confirmAction === "trash" ? trashSelected : restart}>{confirmAction === "trash" ? "移到回收站" : "开始新一轮"}</button></div>
+            <span className={`dialog-icon${confirmAction === "trash" ? " is-danger" : ""}`}>{confirmAction === "trash" ? <Trash2 size={22} /> : confirmAction === "end" ? <LogOut size={22} /> : <RotateCcw size={22} />}</span>
+            <h2>{confirmAction === "trash" ? `将 ${selected.size} 张照片移到回收站？` : confirmAction === "end" ? (lastMove ? "结束前，是否撤销本次移动？" : "结束本次整理？") : "开始新一轮筛选？"}</h2>
+            <p>{confirmAction === "trash" ? "照片会进入系统回收站，拾影不会永久删除文件。你可以之后从系统回收站恢复。" : confirmAction === "end" ? (lastMove ? "直接结束会保留已经完成的文件移动；也可以先把照片恢复到原文件夹再退出。筛选记录不会丢失。" : "当前照片会从工作区关闭，筛选记录仍保存在本机。照片不会被移动或删除，下次打开同一文件夹可以继续。") : "所有保留和排除标记会恢复为待筛选。照片文件与分析缓存不会改变。"}</p>
+            <div className={`dialog-actions${confirmAction === "end" && lastMove ? " has-three-actions" : ""}`}>
+              <button className="button secondary" type="button" onClick={() => setConfirmAction(null)}>{confirmAction === "end" ? "继续整理" : "取消"}</button>
+              {confirmAction === "end" && lastMove && <button className="button secondary" type="button" disabled={busy} onClick={() => void undoMove(true)}><Undo2 size={16} />撤销并结束</button>}
+              <button className={`button ${confirmAction === "trash" ? "danger" : "primary"}`} type="button" disabled={busy} onClick={confirmAction === "trash" ? trashSelected : confirmAction === "end" ? endSession : restart}>{confirmAction === "trash" ? "移到回收站" : confirmAction === "end" ? (lastMove ? "保留移动并结束" : "结束本次整理") : "开始新一轮"}</button>
+            </div>
           </div>
         </div>
       )}
