@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -40,7 +41,7 @@ class FeatureCache:
         found: dict[Path, PhotoRecord] = {}
         touched: list[tuple[int, str]] = []
         try:
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 now = int(time.time())
                 for path in paths:
                     try:
@@ -93,7 +94,7 @@ class FeatureCache:
         if not rows:
             return
         try:
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.executemany(
                     """
                     INSERT INTO features

@@ -89,7 +89,10 @@ def test_large_photo_group_is_rendered_in_responsive_batches() -> None:
 
     assert len(window.cards) == CARD_RENDER_BATCH_SIZE
     assert not window.card_loading_progress.isHidden()
-    QTest.qWait(80)
+    for _ in range(100):
+        if len(window.cards) == len(photos):
+            break
+        QTest.qWait(20)
     assert len(window.cards) == len(photos)
     assert not window.card_loading_progress.isVisible()
     window.close()
