@@ -575,8 +575,10 @@ class PhotoCard(QFrame):
         title_row.addWidget(self.status_label)
         caption_layout.addLayout(title_row)
 
+        captured_at = photo.captured_at
         details = QLabel(
-            f"{photo.captured_at:%m月%d日 %H:%M}  ·  {photo.format_label}"
+            f"{captured_at.month:02d}月{captured_at.day:02d}日 "
+            f"{captured_at.hour:02d}:{captured_at.minute:02d}  ·  {photo.format_label}"
             f"  ·  {photo.file_size_label}"
         )
         details.setObjectName("photoDetails")
@@ -1035,8 +1037,14 @@ class PhotoViewer(QDialog):
 
     def _metadata_rows(self, photo: PhotoRecord) -> list[tuple[str, str]]:
         metadata = photo.metadata
+        captured_at = photo.captured_at
         rows = [
-            ("拍摄时间", photo.captured_at.strftime("%Y年%m月%d日 %H:%M:%S")),
+            (
+                "拍摄时间",
+                f"{captured_at.year:04d}年{captured_at.month:02d}月"
+                f"{captured_at.day:02d}日 {captured_at.hour:02d}:"
+                f"{captured_at.minute:02d}:{captured_at.second:02d}",
+            ),
             ("尺寸", f"{photo.dimension_label}  ·  {photo.megapixels:.1f} MP"),
             ("文件", f"{photo.format_label}  ·  {photo.file_size_label}"),
         ]
