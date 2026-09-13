@@ -1,4 +1,6 @@
 import os
+from datetime import datetime
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -7,7 +9,10 @@ from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from photo_fit_picker.models import PhotoGroup, PhotoRecord
 from photo_fit_picker.ui import (
+    CARD_RENDER_BATCH_SIZE,
+    MainWindow,
     ZoomablePhotoArea,
     _clamped_thumbnail_size,
     _normalized_view_mode,
@@ -53,3 +58,38 @@ def test_photo_area_switches_between_fit_and_actual_size() -> None:
     assert area.fit_mode
     assert area.zoom_percent == fit_percent
     area.close()
+
+
+def test_large_photo_group_is_rendered_in_responsive_batches() -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("CardBatching")
+    image_path = Path("demo-photos/01_lake_clear.jpg").resolve()
+    neutral = tuple([1 / 48] * 48)
+    photos = [
+        PhotoRecord(
+            path=image_path,
+            width=1200,
+            height=800,
+            file_size=image_path.stat().st_size,
+            captured_at=datetime(2026, 1, 1),
+            dhash=index,
+            color_signature=neutral,
+            sharpness=0.1,
+            exposure=0.5,
+        )
+        for index in range(CARD_RENDER_BATCH_SIZE + 10)
+    ]
+    window = MainWindow()
+    window.groups = [PhotoGroup(1, photos)]
+    window.visible_groups = window.groups
+    window.group_list.addItem("01")
+
+    window.group_list.setCurrentRow(0)
+
+    assert len(window.cards) == CARD_RENDER_BATCH_SIZE
+    assert not window.card_loading_progress.isHidden()
+    QTest.qWait(80)
+    assert len(window.cards) == len(photos)
+    assert not window.card_loading_progress.isVisible()
+    window.close()

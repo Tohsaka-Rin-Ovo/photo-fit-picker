@@ -159,8 +159,7 @@ class PhotoGroup:
     exposure_weight: float = 0.25
     resolution_weight: float = 0.0
 
-    def score(self, photo: PhotoRecord) -> float:
-        max_megapixels = max((item.megapixels for item in self.photos), default=1.0)
+    def _score(self, photo: PhotoRecord, max_megapixels: float) -> float:
         sharpness_quality = min(1.0, photo.sharpness / 0.12)
         exposure_quality = max(0.0, 1.0 - abs(photo.exposure - 0.5) * 1.8)
         resolution_quality = photo.megapixels / max_megapixels if max_megapixels else 0.0
@@ -175,6 +174,10 @@ class PhotoGroup:
             + resolution_quality * self.resolution_weight
         ) / total_weight
 
+    def score(self, photo: PhotoRecord) -> float:
+        max_megapixels = max((item.megapixels for item in self.photos), default=1.0)
+        return self._score(photo, max_megapixels)
+
     @property
     def recommended(self) -> Optional[PhotoRecord]:
         candidates = [
@@ -184,7 +187,8 @@ class PhotoGroup:
         ]
         if not candidates:
             return None
-        return max(candidates, key=self.score)
+        max_megapixels = max((photo.megapixels for photo in candidates), default=1.0)
+        return max(candidates, key=lambda photo: self._score(photo, max_megapixels))
 
     def recommendation_reason(self, photo: PhotoRecord) -> str:
         if photo is self.recommended:

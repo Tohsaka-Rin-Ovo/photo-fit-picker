@@ -382,6 +382,10 @@ QListWidget::item:selected {
 #viewSizeSlider {
     min-height: 24px;
 }
+#cardLoadingProgress {
+    min-height: 5px;
+    max-height: 5px;
+}
 #photoCard {
     background: @surface;
     border: 1px solid @border;

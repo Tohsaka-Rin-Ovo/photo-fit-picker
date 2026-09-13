@@ -109,6 +109,7 @@ REVIEW_PRESETS = {
 
 VIEW_MODES = {"compact", "large", "list"}
 VIEW_MODE_SIZES = {"compact": 168, "large": 268, "list": 136}
+CARD_RENDER_BATCH_SIZE = 24
 
 
 def _normalized_view_mode(value: object) -> str:
@@ -1994,6 +1995,7 @@ class MainWindow(QMainWindow):
             QStandardPaths.StandardLocation.AppDataLocation
         )
         state_root = Path(state_location or Path.home() / ".photo-fit-picker")
+        self.feature_cache_path = state_root / "analysis-cache.sqlite3"
         self.session_store = ReviewSessionStore(state_root / "review-sessions")
         self.latest_session: Optional[ReviewSessionSummary] = (
             self.session_store.latest()
@@ -2002,6 +2004,9 @@ class MainWindow(QMainWindow):
         self.visible_groups: list[PhotoGroup] = []
         self.cards: list[PhotoCard] = []
         self._grid_columns = 0
+        self._card_render_generation = 0
+        self._pending_card_photos: list[PhotoRecord] = []
+        self._card_render_recommended: Optional[PhotoRecord] = None
         self._settings_return_index = 0
         self.analysis_thread: Optional[QThread] = None
         self.analysis_worker: Optional[AnalysisWorker] = None
@@ -2372,6 +2377,12 @@ class MainWindow(QMainWindow):
         view_layout = QHBoxLayout(view_controls)
         view_layout.setContentsMargins(0, 0, 0, 0)
         view_layout.setSpacing(8)
+        self.card_loading_progress = QProgressBar()
+        self.card_loading_progress.setObjectName("cardLoadingProgress")
+        self.card_loading_progress.setTextVisible(False)
+        self.card_loading_progress.setFixedWidth(104)
+        self.card_loading_progress.hide()
+        view_layout.addWidget(self.card_loading_progress)
         view_layout.addStretch()
         size_small = QLabel()
         size_small.setPixmap(_icon("image-outline", ICON_MUTED).pixmap(15, 15))
@@ -2868,6 +2879,7 @@ class MainWindow(QMainWindow):
         worker = AnalysisWorker(
             paths,
             self.analysis_options,
+            self.feature_cache_path,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3064,10 +3076,26 @@ class MainWindow(QMainWindow):
             else Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
         self.photo_grid.setColumnStretch(0, 1 if self.view_mode == "list" else 0)
-        for index, photo in enumerate(group.photos):
+        self._pending_card_photos = list(group.photos)
+        self._card_render_recommended = recommended
+        generation = self._card_render_generation
+        self.card_loading_progress.setRange(0, len(group.photos))
+        self.card_loading_progress.setValue(0)
+        self.card_loading_progress.setVisible(len(group.photos) > CARD_RENDER_BATCH_SIZE)
+        self._render_card_batch(generation)
+        self._update_group_navigation()
+
+    def _render_card_batch(self, generation: int) -> None:
+        if generation != self._card_render_generation:
+            return
+        start = len(self.cards)
+        total = len(self._pending_card_photos)
+        end = min(total, start + CARD_RENDER_BATCH_SIZE)
+        for index in range(start, end):
+            photo = self._pending_card_photos[index]
             card = PhotoCard(
                 photo,
-                photo is recommended,
+                photo is self._card_render_recommended,
                 self.view_mode,
                 self.thumbnail_size,
             )
@@ -3075,9 +3103,28 @@ class MainWindow(QMainWindow):
             card.selection_changed.connect(self._selection_changed)
             card.open_requested.connect(self._open_viewer)
             self.cards.append(card)
-            self.photo_grid.addWidget(card, index // columns, index % columns)
+            self.photo_grid.addWidget(
+                card,
+                index // self._grid_columns,
+                index % self._grid_columns,
+            )
             card.animate_in(min(index, 8) * 28)
-        self._update_group_navigation()
+        self.card_loading_progress.setValue(end)
+        if end >= total:
+            self.card_loading_progress.hide()
+            row = self.group_list.currentRow()
+            if 0 <= row < len(self.visible_groups):
+                self.group_meta.setText(
+                    f"{row + 1} / {len(self.visible_groups)}  ·  {total} 张"
+                )
+            return
+        row = self.group_list.currentRow()
+        if 0 <= row < len(self.visible_groups):
+            self.group_meta.setText(
+                f"{row + 1} / {len(self.visible_groups)}  ·  {total} 张"
+                f"  ·  正在载入 {end}/{total}"
+            )
+        QTimer.singleShot(0, lambda: self._render_card_batch(generation))
 
     def _update_group_navigation(self) -> None:
         row = self.group_list.currentRow()
@@ -3117,6 +3164,11 @@ class MainWindow(QMainWindow):
             self.photo_grid.addWidget(card, index // columns, index % columns)
 
     def _clear_grid(self) -> None:
+        self._card_render_generation += 1
+        self._pending_card_photos = []
+        self._card_render_recommended = None
+        if hasattr(self, "card_loading_progress"):
+            self.card_loading_progress.hide()
         while self.photo_grid.count():
             item = self.photo_grid.takeAt(0)
             widget = item.widget()

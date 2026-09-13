@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -8,6 +10,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from PIL import Image, ImageFilter, ImageOps, ImageStat
 
+from .feature_cache import FeatureCache
 from .models import AnalysisOptions, CameraMetadata, PhotoGroup, PhotoRecord
 
 try:
@@ -84,6 +87,9 @@ RAW_EXTENSIONS = {
 }
 
 SUPPORTED_EXTENSIONS = STANDARD_EXTENSIONS | RAW_EXTENSIONS
+MEMORY_HEAVY_EXTENSIONS = RAW_EXTENSIONS | {".heic", ".heif", ".tif", ".tiff"}
+ANALYSIS_IMAGE_MAX_SIZE = 1024
+DUPLICATE_SAMPLE_SIZE = 64 * 1024
 
 
 def _first_tag(tags: Mapping[str, Any], *names: str) -> Any:
@@ -280,17 +286,35 @@ def _raw_image(path: Path) -> tuple[Image.Image, int, int]:
     return image, width, height
 
 
-def _decoded_image(path: Path) -> tuple[Image.Image, int, int, datetime]:
+def _decoded_image(
+    path: Path,
+    known_capture_time: Optional[datetime] = None,
+) -> tuple[Image.Image, int, int, datetime]:
     if path.suffix.lower() in RAW_EXTENSIONS:
         image, width, height = _raw_image(path)
-        return image, width, height, _capture_time(image, path)
+        return image, width, height, known_capture_time or _capture_time(image, path)
 
     with Image.open(path) as source:
-        captured_at = _capture_time(source, path)
+        captured_at = known_capture_time or _capture_time(source, path)
+        width, height = source.size
+        try:
+            orientation = int(source.getexif().get(274, 1))
+        except (AttributeError, TypeError, ValueError):
+            orientation = 1
+        if orientation in {5, 6, 7, 8}:
+            width, height = height, width
+        try:
+            source.draft("RGB", (ANALYSIS_IMAGE_MAX_SIZE, ANALYSIS_IMAGE_MAX_SIZE))
+        except (AttributeError, OSError):
+            pass
         oriented = ImageOps.exif_transpose(source)
+        oriented.thumbnail(
+            (ANALYSIS_IMAGE_MAX_SIZE, ANALYSIS_IMAGE_MAX_SIZE),
+            Image.Resampling.LANCZOS,
+        )
         oriented.load()
         image = oriented.copy()
-    return image, image.width, image.height, captured_at
+    return image, width, height, captured_at
 
 
 def load_display_image(path: Path) -> Image.Image:
@@ -347,7 +371,7 @@ def _quality_metrics(image: Image.Image) -> tuple[float, float]:
 
 def extract_feature(path: Path) -> PhotoRecord:
     metadata = extract_metadata(path)
-    image, width, height, captured_at = _decoded_image(path)
+    image, width, height, captured_at = _decoded_image(path, metadata.captured_at)
     try:
         dhash = _difference_hash(image)
         average_hash = _average_hash(image)
@@ -374,20 +398,66 @@ def analyze_paths(
     paths: Sequence[Path],
     progress: Optional[Callable[[int, int, str], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
+    cache: Optional[FeatureCache] = None,
 ) -> tuple[list[PhotoRecord], list[tuple[Path, str]]]:
-    records: list[PhotoRecord] = []
+    if not paths:
+        return [], []
+    records: list[Optional[PhotoRecord]] = [None] * len(paths)
     failures: list[tuple[Path, str]] = []
     total = len(paths)
-    for index, path in enumerate(paths, start=1):
-        if cancelled and cancelled():
-            break
-        try:
-            records.append(extract_feature(path))
-        except Exception as exc:  # Pillow raises format-specific exceptions.
-            failures.append((path, str(exc)))
-        if progress:
-            progress(index, total, path.name)
-    return records, failures
+    cached = cache.load(paths) if cache else {}
+    missing: list[tuple[int, Path]] = []
+    for index, path in enumerate(paths):
+        record = cached.get(path)
+        if record is None:
+            missing.append((index, path))
+        else:
+            records[index] = record
+    completed = total - len(missing)
+    if progress and completed:
+        progress(completed, total, f"已复用 {completed} 张照片的分析结果")
+    if not missing:
+        return [record for record in records if record is not None], []
+
+    memory_heavy = any(
+        path.suffix.lower() in MEMORY_HEAVY_EXTENSIONS
+        for _, path in missing
+    )
+    worker_limit = 2 if memory_heavy else 4
+    worker_count = min(
+        len(missing),
+        max(2, min(worker_limit, (os.cpu_count() or 2) // 2)),
+    )
+    executor = ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="photo-analysis",
+    )
+    futures = {
+        executor.submit(extract_feature, path): (index, path)
+        for index, path in missing
+    }
+    new_records: list[PhotoRecord] = []
+    try:
+        for future in as_completed(futures):
+            if cancelled and cancelled():
+                for pending in futures:
+                    pending.cancel()
+                break
+            index, path = futures[future]
+            try:
+                record = future.result()
+                records[index] = record
+                new_records.append(record)
+            except Exception as exc:  # Pillow raises format-specific exceptions.
+                failures.append((path, str(exc)))
+            completed += 1
+            if progress:
+                progress(completed, total, path.name)
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    if cache:
+        cache.store(new_records)
+    return [record for record in records if record is not None], failures
 
 
 def hamming_distance(left: int, right: int) -> int:
@@ -419,31 +489,104 @@ def visual_similarity(
     )
 
 
-def _content_digest(path: Path) -> str:
+def _maximum_viable_hash_distance(threshold: float, color_weight: float) -> int:
+    color_weight = max(0.0, min(1.0, color_weight))
+    if color_weight >= 1.0 or threshold <= color_weight:
+        return 64
+    required_hash_similarity = (threshold - color_weight) / (1.0 - color_weight)
+    return max(0, min(64, int((1.0 - required_hash_similarity) * 64)))
+
+
+def _sample_digest(path: Path, file_size: int) -> tuple[str, bool]:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        if file_size <= DUPLICATE_SAMPLE_SIZE * 2:
+            digest.update(stream.read())
+            return digest.hexdigest(), True
+        digest.update(stream.read(DUPLICATE_SAMPLE_SIZE))
+        stream.seek(-DUPLICATE_SAMPLE_SIZE, 2)
+        digest.update(stream.read(DUPLICATE_SAMPLE_SIZE))
+    return digest.hexdigest(), False
+
+
+def _content_digest(
+    path: Path,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> Optional[str]:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(1024 * 1024):
+            if cancelled and cancelled():
+                return None
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _union_exact_duplicates(records: Sequence[PhotoRecord], disjoint: "_DisjointSet") -> None:
+def _union_exact_duplicates(
+    records: Sequence[PhotoRecord],
+    disjoint: "_DisjointSet",
+    progress: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
+) -> bool:
+    total = len(records)
     candidates: dict[int, list[int]] = {}
     for index, photo in enumerate(records):
-        if photo.path.is_file():
-            candidates.setdefault(photo.file_size, []).append(index)
-    for indices in candidates.values():
-        if len(indices) < 2:
+        if cancelled and cancelled():
+            return False
+        candidates.setdefault(photo.file_size, []).append(index)
+
+    sampled: dict[tuple[int, str], list[tuple[int, bool]]] = {}
+    for index, photo in enumerate(records):
+        if cancelled and cancelled():
+            return False
+        same_size = candidates.get(photo.file_size, ())
+        if len(same_size) >= 2:
+            try:
+                digest, is_complete = _sample_digest(photo.path, photo.file_size)
+            except OSError:
+                pass
+            else:
+                sampled.setdefault((photo.file_size, digest), []).append(
+                    (index, is_complete)
+                )
+        if progress:
+            progress(index + 1, max(1, total * 2))
+
+    needs_full_digest: list[list[int]] = []
+    for entries in sampled.values():
+        if len(entries) < 2:
             continue
+        indices = [index for index, _ in entries]
+        if all(is_complete for _, is_complete in entries):
+            first = indices[0]
+            for index in indices[1:]:
+                disjoint.union(first, index)
+        else:
+            needs_full_digest.append(indices)
+
+    processed = 0
+    for indices in needs_full_digest:
         digests: dict[str, int] = {}
         for index in indices:
+            if cancelled and cancelled():
+                return False
             try:
-                digest = _content_digest(records[index].path)
+                digest = _content_digest(records[index].path, cancelled)
             except OSError:
-                continue
-            first = digests.setdefault(digest, index)
-            if first != index:
-                disjoint.union(first, index)
+                digest = None
+            if digest is None:
+                if cancelled and cancelled():
+                    return False
+            else:
+                first = digests.setdefault(digest, index)
+                if first != index:
+                    disjoint.union(first, index)
+            processed += 1
+            if progress:
+                progress(min(total * 2, total + processed), max(1, total * 2))
+    if progress:
+        progress(total * 2, max(1, total * 2))
+    return True
 
 
 class _DisjointSet:
@@ -475,6 +618,8 @@ def group_similar_photos(
     *,
     similarity_threshold: Optional[float] = None,
     time_window_seconds: Optional[int] = None,
+    progress: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> list[PhotoGroup]:
     options = options or AnalysisOptions()
     threshold = max(0.0, min(1.0, (
@@ -489,18 +634,41 @@ def group_similar_photos(
     )
     ordered = sorted(records, key=lambda photo: (photo.captured_at, photo.path.name.lower()))
     disjoint = _DisjointSet(len(ordered))
+    maximum_hash_distance = _maximum_viable_hash_distance(
+        threshold,
+        options.color_weight,
+    )
+    duplicate_steps = len(ordered) * 2 if options.detect_exact_duplicates else 0
+    total_steps = max(1, duplicate_steps + len(ordered))
     if options.detect_exact_duplicates:
-        _union_exact_duplicates(ordered, disjoint)
+        completed = _union_exact_duplicates(
+            ordered,
+            disjoint,
+            progress=(
+                (lambda current, _total: progress(current, total_steps))
+                if progress
+                else None
+            ),
+            cancelled=cancelled,
+        )
+        if not completed:
+            return []
     for left_index, left in enumerate(ordered):
+        if cancelled and cancelled():
+            return []
         for right_index in range(left_index + 1, len(ordered)):
             right = ordered[right_index]
             time_gap = (right.captured_at - left.captured_at).total_seconds()
+            if time_gap > max(time_window * 4, 600):
+                break
+            if disjoint.find(left_index) == disjoint.find(right_index):
+                continue
             left_hash = left.average_hash if options.hash_method == "average" else left.dhash
             right_hash = right.average_hash if options.hash_method == "average" else right.dhash
             hash_distance = hamming_distance(left_hash, right_hash)
             if time_gap > time_window and hash_distance > 6:
-                if time_gap > max(time_window * 4, 600):
-                    break
+                continue
+            if hash_distance > maximum_hash_distance:
                 continue
             if visual_similarity(
                 left,
@@ -509,6 +677,8 @@ def group_similar_photos(
                 hash_method=options.hash_method,
             ) >= threshold:
                 disjoint.union(left_index, right_index)
+        if progress and (left_index % 16 == 0 or left_index + 1 == len(ordered)):
+            progress(duplicate_steps + left_index + 1, total_steps)
 
     buckets: dict[int, list[PhotoRecord]] = {}
     for index, photo in enumerate(ordered):

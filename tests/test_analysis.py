@@ -14,6 +14,7 @@ import photo_fit_picker.analysis as analysis_module
 from photo_fit_picker.analysis import (
     RAW_EXTENSIONS,
     _gps_coordinate,
+    _maximum_viable_hash_distance,
     discover_images,
     extract_feature,
     extract_metadata,
@@ -200,8 +201,34 @@ class AnalysisTests(unittest.TestCase):
             self.assertGreater(record.exposure, 0.5)
             self.assertEqual(len(record.color_signature), 48)
 
+    def test_large_image_is_downsampled_without_losing_original_dimensions(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "large.jpg"
+            Image.new("RGB", (2400, 1600), (128, 160, 192)).save(path)
+            analyzed_sizes: list[tuple[int, int]] = []
+
+            def capture_size(image: Image.Image) -> int:
+                analyzed_sizes.append(image.size)
+                return 0
+
+            with patch.object(
+                analysis_module,
+                "_difference_hash",
+                side_effect=capture_size,
+            ):
+                record = extract_feature(path)
+
+        self.assertEqual((record.width, record.height), (2400, 1600))
+        self.assertTrue(analyzed_sizes)
+        self.assertLessEqual(max(analyzed_sizes[0]), analysis_module.ANALYSIS_IMAGE_MAX_SIZE)
+
     def test_hamming_distance(self) -> None:
         self.assertEqual(hamming_distance(0b1010, 0b0011), 2)
+
+    def test_hash_prefilter_uses_the_best_possible_color_score(self) -> None:
+        self.assertEqual(_maximum_viable_hash_distance(0.84, 0.22), 13)
+        self.assertEqual(_maximum_viable_hash_distance(0.7, 0.5), 38)
+        self.assertEqual(_maximum_viable_hash_distance(0.4, 0.5), 64)
 
     def test_photo_display_labels_explain_quality(self) -> None:
         photo = make_photo("DSC_0042.nef", 0, 0, tuple([1 / 48] * 48))
@@ -277,13 +304,83 @@ class AnalysisTests(unittest.TestCase):
             first = make_photo(str(first_path), 0, 0, neutral)
             second = make_photo(str(second_path), (1 << 64) - 1, 86_400, neutral)
             first.file_size = second.file_size = first_path.stat().st_size
+            progress: list[tuple[int, int]] = []
 
             groups = group_similar_photos(
                 [first, second],
                 AnalysisOptions(similarity_threshold=0.99, time_window_seconds=5),
+                progress=lambda current, total: progress.append((current, total)),
             )
 
         self.assertEqual(len(groups), 1)
+        self.assertEqual(progress[-1], (6, 6))
+        self.assertEqual(progress, sorted(progress))
+
+    def test_duplicate_sample_avoids_full_reads_for_different_files(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            folder = Path(temporary_directory)
+            file_size = analysis_module.DUPLICATE_SAMPLE_SIZE * 3
+            neutral = tuple([1 / 48] * 48)
+            photos = []
+            for index in range(12):
+                path = folder / f"{index}.jpg"
+                path.write_bytes(bytes([index]) + bytes(file_size - 1))
+                photo = make_photo(str(path), index, index, neutral)
+                photo.file_size = file_size
+                photos.append(photo)
+
+            with patch.object(
+                analysis_module,
+                "_content_digest",
+                wraps=analysis_module._content_digest,
+            ) as full_digest:
+                groups = group_similar_photos(
+                    photos,
+                    AnalysisOptions(
+                        similarity_threshold=1.0,
+                        time_window_seconds=0,
+                    ),
+                )
+
+        self.assertEqual(len(groups), len(photos))
+        self.assertEqual(full_digest.call_count, 0)
+
+    def test_large_exact_duplicates_are_verified_with_full_digest(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            folder = Path(temporary_directory)
+            content = bytes(analysis_module.DUPLICATE_SAMPLE_SIZE * 3)
+            first_path = folder / "first.nef"
+            second_path = folder / "copy.nef"
+            first_path.write_bytes(content)
+            second_path.write_bytes(content)
+            neutral = tuple([1 / 48] * 48)
+            first = make_photo(str(first_path), 0, 0, neutral)
+            second = make_photo(str(second_path), (1 << 64) - 1, 86_400, neutral)
+            first.file_size = second.file_size = len(content)
+
+            with patch.object(
+                analysis_module,
+                "_content_digest",
+                wraps=analysis_module._content_digest,
+            ) as full_digest:
+                groups = group_similar_photos([first, second])
+
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(full_digest.call_count, 2)
+
+    def test_duplicate_detection_can_be_cancelled_during_sampling(self) -> None:
+        neutral = tuple([1 / 48] * 48)
+        photos = [make_photo(f"{index}.jpg", index, index, neutral) for index in range(20)]
+        checks = 0
+
+        def cancel_after_first_check() -> bool:
+            nonlocal checks
+            checks += 1
+            return checks > 1
+
+        groups = group_similar_photos(photos, cancelled=cancel_after_first_check)
+
+        self.assertEqual(groups, [])
 
     def test_recommendation_weights_can_prefer_resolution(self) -> None:
         neutral = tuple([1 / 48] * 48)
@@ -305,6 +402,23 @@ class AnalysisTests(unittest.TestCase):
 
         self.assertIs(quality_group.recommended, sharp)
         self.assertIs(resolution_group.recommended, large)
+
+    def test_grouping_skips_pairs_already_joined_by_a_similar_chain(self) -> None:
+        neutral = tuple([1 / 48] * 48)
+        photos = [make_photo(f"{index}.jpg", 0, index, neutral) for index in range(200)]
+
+        with patch.object(
+            analysis_module,
+            "visual_similarity",
+            wraps=analysis_module.visual_similarity,
+        ) as similarity:
+            groups = group_similar_photos(
+                photos,
+                AnalysisOptions(detect_exact_duplicates=False),
+            )
+
+        self.assertEqual(len(groups), 1)
+        self.assertLessEqual(similarity.call_count, len(photos))
 
 
 if __name__ == "__main__":
