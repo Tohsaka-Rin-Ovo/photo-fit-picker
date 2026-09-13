@@ -30,12 +30,12 @@ jobs:
         include:
           - os: macos-14
             artifact: photo-fit-picker-next-macos
+            bundles: dmg
             bundle: desktop/src-tauri/target/release/bundle/dmg/*.dmg
           - os: windows-2022
             artifact: photo-fit-picker-next-windows
-            bundle: |
-              desktop/src-tauri/target/release/bundle/nsis/*.exe
-              desktop/src-tauri/target/release/bundle/msi/*.msi
+            bundles: nsis
+            bundle: desktop/src-tauri/target/release/bundle/nsis/*.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -75,7 +75,7 @@ jobs:
         run: pnpm install --no-frozen-lockfile
       - name: Build desktop application
         working-directory: desktop
-        run: pnpm tauri build
+        run: pnpm tauri build --bundles ${{ matrix.bundles }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
