@@ -2172,6 +2172,53 @@ class MainWindow(QMainWindow):
         self.batch_bar.hide()
         self.content_stack.addWidget(review)
 
+        analysis = QWidget()
+        analysis.setObjectName("analysisView")
+        analysis_layout = QVBoxLayout(analysis)
+        analysis_layout.setContentsMargins(48, 48, 48, 48)
+        analysis_layout.addStretch()
+        self.analysis_panel = QFrame()
+        self.analysis_panel.setObjectName("analysisPanel")
+        self.analysis_panel.setMaximumWidth(560)
+        panel_layout = QVBoxLayout(self.analysis_panel)
+        panel_layout.setContentsMargins(28, 26, 28, 24)
+        panel_layout.setSpacing(10)
+        analysis_icon = QLabel()
+        analysis_icon.setObjectName("analysisIcon")
+        analysis_icon.setPixmap(_icon("image-search-outline", ICON_ACCENT).pixmap(32, 32))
+        panel_layout.addWidget(analysis_icon)
+        self.analysis_title = QLabel("正在分析照片")
+        self.analysis_title.setObjectName("analysisTitle")
+        panel_layout.addWidget(self.analysis_title)
+        self.analysis_detail = QLabel("正在准备照片列表…")
+        self.analysis_detail.setObjectName("analysisDetail")
+        self.analysis_detail.setWordWrap(True)
+        panel_layout.addWidget(self.analysis_detail)
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(12)
+        self.analysis_progress = QProgressBar()
+        self.analysis_progress.setObjectName("analysisProgress")
+        self.analysis_progress.setTextVisible(False)
+        progress_row.addWidget(self.analysis_progress, 1)
+        self.analysis_count = QLabel("0 / 0")
+        self.analysis_count.setObjectName("analysisCount")
+        progress_row.addWidget(self.analysis_count)
+        panel_layout.addLayout(progress_row)
+        self.analysis_cancel_button = FeedbackButton("取消分析")
+        self.analysis_cancel_button.setObjectName("analysisPanelCancel")
+        self.analysis_cancel_button.setIcon(_icon("close"))
+        self.analysis_cancel_button.clicked.connect(self._cancel_analysis)
+        panel_layout.addWidget(
+            self.analysis_cancel_button,
+            alignment=Qt.AlignmentFlag.AlignRight,
+        )
+        analysis_layout.addWidget(
+            self.analysis_panel,
+            alignment=Qt.AlignmentFlag.AlignHCenter,
+        )
+        analysis_layout.addStretch()
+        self.content_stack.addWidget(analysis)
+
         return self.content_stack
 
     def _build_shortcuts(self) -> None:
@@ -2257,7 +2304,6 @@ class MainWindow(QMainWindow):
     def _set_analysis_busy(self, busy: bool) -> None:
         self.folder_button.setEnabled(not busy)
         self.settings_button.setEnabled(not busy)
-        self.content_stack.setEnabled(not busy)
         self.sidebar_review_panel.setEnabled(not busy)
         self.organize_button.setEnabled(not busy and bool(self.groups))
         self.settings_view.set_analysis_available(
@@ -2267,6 +2313,11 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(busy)
         self.cancel_analysis_button.setVisible(busy)
         self.cancel_analysis_button.setEnabled(busy)
+        self.analysis_cancel_button.setEnabled(busy)
+        if busy:
+            self.content_stack.setCurrentIndex(2)
+        else:
+            self.content_stack.setCurrentIndex(1 if self.groups else 0)
         if not busy:
             self._update_summary()
 
@@ -2275,6 +2326,8 @@ class MainWindow(QMainWindow):
             return
         self.analysis_worker.cancel()
         self.cancel_analysis_button.setEnabled(False)
+        self.analysis_cancel_button.setEnabled(False)
+        self.analysis_detail.setText("正在安全停止分析…")
         self.statusBar().showMessage("正在取消分析…")
 
     def _open_settings(self) -> None:
@@ -2502,6 +2555,12 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, len(paths))
         self.progress.setValue(0)
         self.progress.show()
+        self.analysis_progress.setRange(0, len(paths))
+        self.analysis_progress.setValue(0)
+        self.analysis_count.setText(f"0 / {len(paths)}")
+        self.analysis_detail.setText(
+            f"正在准备 {len(paths)} 张照片，本过程只读取文件，不会移动或删除照片。"
+        )
         self.statusBar().showMessage(f"准备分析 {len(paths)} 张照片…")
 
         thread = QThread(self)
@@ -2531,6 +2590,10 @@ class MainWindow(QMainWindow):
     def _analysis_progress(self, current: int, total: int, filename: str) -> None:
         self.progress.setMaximum(total)
         self.progress.setValue(current)
+        self.analysis_progress.setMaximum(total)
+        self.analysis_progress.setValue(current)
+        self.analysis_count.setText(f"{current} / {total}")
+        self.analysis_detail.setText(filename)
         self.statusBar().showMessage(f"正在分析 {current}/{total}：{filename}")
 
     def _analysis_finished(

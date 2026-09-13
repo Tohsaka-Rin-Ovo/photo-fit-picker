@@ -180,6 +180,35 @@ QScrollArea, QScrollArea > QWidget > QWidget {
     font-size: 18px;
     font-weight: 600;
 }
+#analysisView {
+    background: @workspace;
+}
+#analysisPanel {
+    background: @surface;
+    border: 1px solid @border;
+    border-radius: 8px;
+}
+#analysisTitle {
+    color: @text;
+    font-size: 20px;
+    font-weight: 600;
+}
+#analysisDetail {
+    min-height: 36px;
+    color: @text_muted;
+}
+#analysisCount {
+    min-width: 58px;
+    color: @text_secondary;
+    font-size: 12px;
+}
+#analysisProgress {
+    min-height: 7px;
+    max-height: 7px;
+}
+#analysisPanelCancel {
+    min-height: 32px;
+}
 
 QPushButton, QComboBox, QSpinBox, QToolButton, QLineEdit {
     min-height: 34px;
