@@ -137,6 +137,25 @@ def _photo_grid_columns(
     return max(1, (max(0, available_width) + spacing) // (card_width + spacing))
 
 
+def _filtered_photo_groups(
+    groups: list[PhotoGroup],
+    mode: object,
+    hide_singletons: bool,
+) -> list[PhotoGroup]:
+    candidates = (
+        [group for group in groups if len(group.photos) > 1]
+        if hide_singletons
+        else list(groups)
+    )
+    if mode == "pending":
+        return [group for group in candidates if not group.reviewed]
+    if mode == "kept":
+        return [group for group in candidates if group.kept_count]
+    if mode == "similar":
+        return [group for group in candidates if len(group.photos) > 1]
+    return candidates
+
+
 def _icon(
     name: str,
     color: str = ICON_COLOR,
@@ -1589,7 +1608,7 @@ class SettingsView(QWidget):
         return page
 
     def _build_review_page(self) -> QWidget:
-        page, layout = self._page("筛选", "调整相似照片成组时使用的判断范围。")
+        page, layout = self._page("筛选", "控制审片范围和相似照片成组时使用的判断范围。")
         preset_group, preset_layout = self._group()
         preset_row = QHBoxLayout()
         preset_row.addWidget(
@@ -1643,6 +1662,27 @@ class SettingsView(QWidget):
         time_row.addWidget(self.time_window)
         group_layout.addLayout(time_row)
         layout.addWidget(group)
+
+        scope_group, scope_layout = self._group()
+        scope_row = QHBoxLayout()
+        scope_row.addWidget(
+            self._text_block(
+                "隐藏单张照片组",
+                "审片区只显示至少包含两张照片的相似组。",
+            ),
+            1,
+        )
+        self.hide_singletons_toggle = SettingsSwitch()
+        self.hide_singletons_toggle.setObjectName("settingsSwitch")
+        self.hide_singletons_toggle.setChecked(
+            _setting_bool(self.preferences, "review/hide_singletons")
+        )
+        self.hide_singletons_toggle.toggled.connect(
+            self._hide_singletons_changed
+        )
+        scope_row.addWidget(self.hide_singletons_toggle)
+        scope_layout.addLayout(scope_row)
+        layout.addWidget(scope_group)
 
         self.reanalyze_button = FeedbackButton("重新分析照片")
         self.reanalyze_button.setObjectName("primaryButton")
@@ -1852,6 +1892,12 @@ class SettingsView(QWidget):
         self.time_window.setValue(time_window)
         self.time_window.blockSignals(False)
 
+        self.hide_singletons_toggle.blockSignals(True)
+        self.hide_singletons_toggle.setChecked(
+            _setting_bool(self.preferences, "review/hide_singletons")
+        )
+        self.hide_singletons_toggle.blockSignals(False)
+
         gap_minutes = int(self.preferences.value("organize/gap_minutes", 180))
         self.organization_gap.blockSignals(True)
         self.organization_gap.setValue(gap_minutes)
@@ -1908,6 +1954,10 @@ class SettingsView(QWidget):
     def _time_window_changed(self, value: int) -> None:
         self.preferences.setValue("review/time_window", value)
         self._mark_custom_preset()
+
+    def _hide_singletons_changed(self, checked: bool) -> None:
+        self.preferences.setValue("review/hide_singletons", checked)
+        self.preferences_changed.emit()
 
     def _preset_changed(self) -> None:
         preset = str(self.preset_combo.currentData())
@@ -1994,6 +2044,7 @@ class MainWindow(QMainWindow):
         self.destination_folder: Optional[Path] = None
         self.similarity_threshold = 84
         self.time_window_seconds = 90
+        self.hide_singleton_groups = False
         self.analysis_options = AnalysisOptions()
         self.destination_mode = "source"
         self.view_mode = "large"
@@ -2109,6 +2160,10 @@ class MainWindow(QMainWindow):
         self.time_window_seconds = max(
             5,
             min(600, int(self.preferences.value("review/time_window", 90))),
+        )
+        self.hide_singleton_groups = _setting_bool(
+            self.preferences,
+            "review/hide_singletons",
         )
         self.analysis_options = AnalysisOptions(
             similarity_threshold=self.similarity_threshold / 100.0,
@@ -2744,6 +2799,8 @@ class MainWindow(QMainWindow):
     def _settings_changed(self) -> None:
         self._load_preferences()
         self._update_destination_ui()
+        if self.groups:
+            self._apply_group_filter()
 
     def _choose_source_from_settings(self) -> None:
         if self.analysis_thread and self.analysis_thread.isRunning():
@@ -2968,14 +3025,11 @@ class MainWindow(QMainWindow):
     def _apply_group_filter(self) -> None:
         settings_open = self.root_stack.currentWidget() is self.settings_view
         mode = self.group_filter.currentData()
-        if mode == "pending":
-            self.visible_groups = [group for group in self.groups if not group.reviewed]
-        elif mode == "kept":
-            self.visible_groups = [group for group in self.groups if group.kept_count]
-        elif mode == "similar":
-            self.visible_groups = [group for group in self.groups if len(group.photos) > 1]
-        else:
-            self.visible_groups = list(self.groups)
+        self.visible_groups = _filtered_photo_groups(
+            self.groups,
+            mode,
+            self.hide_singleton_groups,
+        )
 
         self.group_list.blockSignals(True)
         self.group_list.clear()
@@ -2999,8 +3053,13 @@ class MainWindow(QMainWindow):
         elif self.groups:
             self.sidebar.show()
             self._clear_grid()
-            self.group_title.setText("当前筛选条件下没有照片组")
-            self.group_meta.setText("")
+            hidden_count = sum(len(group.photos) == 1 for group in self.groups)
+            if self.hide_singleton_groups and hidden_count:
+                self.group_title.setText("没有需要对比的相似照片")
+                self.group_meta.setText(f"已略过 {hidden_count} 张单独照片")
+            else:
+                self.group_title.setText("当前筛选条件下没有照片组")
+                self.group_meta.setText("")
             self._update_group_navigation()
             if not settings_open:
                 self.folder_button.show()
@@ -3412,15 +3471,27 @@ class MainWindow(QMainWindow):
 
     def _update_summary(self) -> None:
         photos = [photo for group in self.groups for photo in group.photos]
+        review_photos = [
+            photo
+            for group in self.groups
+            if not self.hide_singleton_groups or len(group.photos) > 1
+            for photo in group.photos
+        ]
         kept = sum(photo.status == ReviewStatus.KEPT for photo in photos)
-        reviewed = sum(photo.status != ReviewStatus.PENDING for photo in photos)
+        reviewed = sum(
+            photo.status != ReviewStatus.PENDING for photo in review_photos
+        )
         similar = sum(len(group.photos) > 1 for group in self.groups)
+        hidden = len(photos) - len(review_photos)
         trashed = sum(photo.status == ReviewStatus.TRASHED for photo in photos)
         if photos:
-            extra = f" · 回收站 {trashed}" if trashed else ""
-            self.summary_label.setText(f"保留 {kept} · 相似组 {similar}{extra}")
-            self.progress_count.setText(f"{reviewed} / {len(photos)}")
-            self.review_progress.setRange(0, len(photos))
+            hidden_text = f" · 略过 {hidden}" if hidden else ""
+            trash_text = f" · 回收站 {trashed}" if trashed else ""
+            self.summary_label.setText(
+                f"保留 {kept} · 相似组 {similar}{hidden_text}{trash_text}"
+            )
+            self.progress_count.setText(f"{reviewed} / {len(review_photos)}")
+            self.review_progress.setRange(0, max(1, len(review_photos)))
             self.review_progress.setValue(reviewed)
         else:
             self.summary_label.setText("尚未分析照片")

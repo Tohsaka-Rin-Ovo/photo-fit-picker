@@ -4,7 +4,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
@@ -15,6 +15,7 @@ from photo_fit_picker.ui import (
     MainWindow,
     ZoomablePhotoArea,
     _clamped_thumbnail_size,
+    _filtered_photo_groups,
     _normalized_view_mode,
     _photo_grid_columns,
 )
@@ -33,6 +34,51 @@ def test_grid_columns_follow_view_mode_and_available_width() -> None:
     assert _photo_grid_columns(900, "large", 268) == 3
     assert _photo_grid_columns(900, "list", 136) == 1
     assert _photo_grid_columns(40, "compact", 168) == 1
+
+
+def test_singleton_groups_can_be_excluded_from_every_review_filter() -> None:
+    neutral = tuple([1 / 48] * 48)
+    photos = [
+        PhotoRecord(
+            path=Path(f"{index}.jpg"),
+            width=1200,
+            height=800,
+            file_size=100,
+            captured_at=datetime(2026, 1, 1),
+            dhash=index,
+            color_signature=neutral,
+            sharpness=0.1,
+            exposure=0.5,
+        )
+        for index in range(3)
+    ]
+    singleton = PhotoGroup(1, [photos[0]])
+    similar = PhotoGroup(2, photos[1:])
+
+    assert _filtered_photo_groups([singleton, similar], "all", False) == [
+        singleton,
+        similar,
+    ]
+    assert _filtered_photo_groups([singleton, similar], "all", True) == [similar]
+    assert _filtered_photo_groups([singleton, similar], "pending", True) == [
+        similar
+    ]
+
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("SingletonFilter")
+    QSettings().clear()
+    window = MainWindow()
+    window.groups = [singleton, similar]
+    window.settings_view.hide_singletons_toggle.setChecked(True)
+
+    assert QSettings().value("review/hide_singletons", type=bool) is True
+    assert window.hide_singleton_groups is True
+    assert window.visible_groups == [similar]
+    assert window.progress_count.text() == "0 / 2"
+    assert "略过 1" in window.summary_label.text()
+    window.close()
+    QSettings().clear()
 
 
 def test_photo_area_switches_between_fit_and_actual_size() -> None:
