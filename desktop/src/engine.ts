@@ -8,12 +8,17 @@ interface EngineEndpoint {
   token: string;
 }
 
+interface ThumbnailEntry {
+  promise: Promise<string>;
+  references: number;
+}
+
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 class EngineClient {
   private endpoint: EngineEndpoint | null = null;
   private connecting: Promise<EngineEndpoint> | null = null;
-  private thumbnailCache = new Map<string, Promise<string>>();
+  private thumbnailCache = new Map<string, ThumbnailEntry>();
 
   get desktopAvailable(): boolean {
     return isTauri();
@@ -105,7 +110,10 @@ class EngineClient {
   thumbnailUrl(photoId: string, maximum = 720): Promise<string> {
     const key = `${photoId}:${maximum}`;
     const cached = this.thumbnailCache.get(key);
-    if (cached) return cached;
+    if (cached) {
+      cached.references += 1;
+      return cached.promise;
+    }
     const pending = this.connect().then(async (endpoint) => {
       const response = await fetch(
         `http://${endpoint.host}:${endpoint.port}/api/thumbnails/${photoId}?max=${maximum}`,
@@ -114,8 +122,18 @@ class EngineClient {
       if (!response.ok) throw new Error("无法读取照片预览");
       return URL.createObjectURL(await response.blob());
     });
-    this.thumbnailCache.set(key, pending);
+    this.thumbnailCache.set(key, { promise: pending, references: 1 });
     return pending;
+  }
+
+  releaseThumbnail(photoId: string, maximum = 720): void {
+    const key = `${photoId}:${maximum}`;
+    const cached = this.thumbnailCache.get(key);
+    if (!cached) return;
+    cached.references -= 1;
+    if (cached.references > 0) return;
+    this.thumbnailCache.delete(key);
+    cached.promise.then(URL.revokeObjectURL, () => undefined);
   }
 }
 

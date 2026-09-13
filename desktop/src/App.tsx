@@ -206,12 +206,14 @@ function Thumbnail({ photo, maximum = 720 }: { photo: Photo; maximum?: number })
         active = false;
       };
     }
+    setSource("");
     engine.thumbnailUrl(photo.id, maximum).then(
       (url) => active && setSource(url),
       () => active && setFailed(true),
     );
     return () => {
       active = false;
+      engine.releaseThumbnail(photo.id, maximum);
     };
   }, [maximum, photo.id, photo.image_url]);
 
@@ -391,7 +393,7 @@ function DetailViewer({ photo, photos, onClose, onNavigate, onReview }: {
           onDoubleClick={() => { setFit(!fit); setZoom(1); }}
         >
           <div className="detail-image" style={{ "--zoom": zoom } as CSSProperties}>
-            <Thumbnail photo={photo} maximum={1600} />
+            <Thumbnail photo={photo} maximum={Math.min(4096, Math.max(photo.width, photo.height))} />
           </div>
           <IconButton label="上一张" disabled={index <= 0} onClick={() => navigate(-1)}><ArrowLeft size={21} /></IconButton>
           <IconButton label="下一张" disabled={index >= photos.length - 1} onClick={() => navigate(1)}><ArrowRight size={21} /></IconButton>

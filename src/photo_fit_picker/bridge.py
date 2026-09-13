@@ -343,7 +343,7 @@ class EngineState:
             ]
 
     def thumbnail(self, photo_id: str, maximum: int = 720) -> Path:
-        maximum = max(160, min(1600, maximum))
+        maximum = max(160, min(4096, maximum))
         with self.lock:
             photo = self.records.get(photo_id)
         if photo is None:
