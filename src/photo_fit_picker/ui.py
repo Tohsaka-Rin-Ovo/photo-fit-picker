@@ -4,21 +4,28 @@ import ctypes
 import math
 import shutil
 import sys
+import threading
+from collections import OrderedDict
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import qtawesome as qta
 from PySide6.QtCore import (
     QEasingCurve,
+    QObject,
     QPointF,
     QPropertyAnimation,
     QRectF,
+    QRunnable,
     QSize,
     QSettings,
     QStandardPaths,
     Qt,
     QThread,
+    QThreadPool,
     QTimer,
+    Slot,
     QVariantAnimation,
     Signal,
 )
@@ -85,6 +92,7 @@ from .fileops import (
 )
 from .models import (
     AnalysisOptions,
+    CameraMetadata,
     PhotoGroup,
     PhotoRecord,
     ReviewStatus,
@@ -116,6 +124,18 @@ VIEW_MODES = {"compact", "large", "list"}
 VIEW_MODE_SIZES = {"compact": 168, "large": 268, "list": 136}
 SORT_MODES = {"recommended", "time", "size"}
 CARD_RENDER_BATCH_SIZE = 24
+PREVIEW_CACHE_LIMIT = 240
+PREVIEW_WORKER_LIMIT = 3
+PREVIEW_RENDER_DELAY_MS = 8
+PREVIEW_PRIORITY_THUMBNAIL = 0
+PREVIEW_PRIORITY_PREFETCH = 1
+PREVIEW_PRIORITY_VIEWER = 2
+
+
+_preview_cache: OrderedDict[tuple[str, int, int, int, int], QImage] = OrderedDict()
+_preview_cache_lock = threading.RLock()
+_preview_locks: dict[tuple[str, int, int, int, int], threading.Lock] = {}
+_preview_thread_pool: Optional[QThreadPool] = None
 
 
 def _normalized_view_mode(value: object) -> str:
@@ -300,17 +320,109 @@ def _read_preview(path: Path, target: QSize) -> QImage:
     try:
         with load_display_image(path) as source:
             fallback = source.convert("RGBA")
-            fallback.thumbnail((target.width(), target.height()), Image.Resampling.LANCZOS)
-            width, height = fallback.size
-            return QImage(
-                fallback.tobytes(),
-                width,
-                height,
-                width * 4,
-                QImage.Format.Format_RGBA8888,
-            ).copy()
+            try:
+                fallback.thumbnail((target.width(), target.height()), Image.Resampling.LANCZOS)
+                width, height = fallback.size
+                return QImage(
+                    fallback.tobytes(),
+                    width,
+                    height,
+                    width * 4,
+                    QImage.Format.Format_RGBA8888,
+                ).copy()
+            finally:
+                fallback.close()
     except Exception:
         return QImage()
+
+
+def _preview_cache_key(path: Path, target: QSize) -> tuple[str, int, int, int, int]:
+    try:
+        stat = path.stat()
+        file_size = stat.st_size
+        modified = stat.st_mtime_ns
+    except OSError:
+        file_size = 0
+        modified = 0
+    return (
+        str(path.resolve()),
+        file_size,
+        modified,
+        max(1, target.width()),
+        max(1, target.height()),
+    )
+
+
+def _get_cached_preview(path: Path, target: QSize) -> QImage:
+    key = _preview_cache_key(path, target)
+    with _preview_cache_lock:
+        image = _preview_cache.get(key)
+        if image is not None:
+            _preview_cache.move_to_end(key)
+            return QImage(image)
+    return QImage()
+
+
+def _cached_preview(path: Path, target: QSize) -> QImage:
+    cached = _get_cached_preview(path, target)
+    if not cached.isNull():
+        return cached
+    key = _preview_cache_key(path, target)
+    with _preview_cache_lock:
+        preview_lock = _preview_locks.setdefault(key, threading.Lock())
+    with preview_lock:
+        cached = _get_cached_preview(path, target)
+        if not cached.isNull():
+            return cached
+        image = _read_preview(path, target)
+        if not image.isNull():
+            with _preview_cache_lock:
+                _preview_cache[key] = QImage(image)
+                _preview_cache.move_to_end(key)
+                while len(_preview_cache) > PREVIEW_CACHE_LIMIT:
+                    old_key, _old_image = _preview_cache.popitem(last=False)
+                    _preview_locks.pop(old_key, None)
+        else:
+            with _preview_cache_lock:
+                _preview_locks.pop(key, None)
+        return image
+
+
+def _preview_pool() -> QThreadPool:
+    global _preview_thread_pool
+    if _preview_thread_pool is None:
+        _preview_thread_pool = QThreadPool()
+        _preview_thread_pool.setMaxThreadCount(PREVIEW_WORKER_LIMIT)
+        _preview_thread_pool.setExpiryTimeout(10_000)
+    return _preview_thread_pool
+
+
+class PreviewLoadSignals(QObject):
+    finished = Signal(int, object)
+
+
+class PreviewLoadTask(QRunnable):
+    def __init__(self, request_id: int, path: Path, target: QSize) -> None:
+        super().__init__()
+        self.request_id = request_id
+        self.path = path
+        self.target = QSize(target)
+        self.signals = PreviewLoadSignals()
+
+    @Slot()
+    def run(self) -> None:
+        self.signals.finished.emit(self.request_id, _cached_preview(self.path, self.target))
+
+
+class PreviewPrefetchTask(QRunnable):
+    def __init__(self, path: Path, target: QSize) -> None:
+        super().__init__()
+        self.path = path
+        self.target = QSize(target)
+
+    @Slot()
+    def run(self) -> None:
+        _cached_preview(self.path, self.target)
 
 
 def _bundled_demo_folder() -> Optional[Path]:
@@ -336,6 +448,63 @@ def _prepare_demo_folder() -> Path:
         if photo.is_file() and photo.suffix.lower() in SUPPORTED_EXTENSIONS:
             shutil.copy2(photo, destination / photo.name)
     return destination
+
+
+def _demo_photo_groups(folder: Path) -> list[PhotoGroup]:
+    demo_files = [
+        ("02_lake_bright.jpg", 1, 0.16, False),
+        ("01_lake_clear.jpg", 1, 0.12, False),
+        ("03_lake_soft.jpg", 1, 0.06, False),
+        ("04_street_clear.jpg", 2, 0.15, True),
+        ("05_street_step.jpg", 2, 0.1, True),
+        ("06_street_dark.jpg", 2, 0.05, False),
+        ("07_coast_clear.jpg", 3, 0.14, False),
+        ("08_coast_shift.jpg", 3, 0.1, False),
+        ("09_coast_soft.jpg", 3, 0.06, False),
+        ("10_forest.jpg", 4, 0.12, False),
+        ("11_abstract.jpg", 5, 0.09, False),
+    ]
+    neutral_signature = tuple([1 / 48] * 48)
+    metadata = CameraMetadata(
+        captured_at=datetime(2026, 5, 18, 9, 30),
+        make="Nikon",
+        model="NIKON Z 6_2",
+        lens="NIKKOR Z 24-70mm f/4 S",
+        exposure_time=1 / 250,
+        aperture=5.6,
+        iso=100,
+        focal_length=35,
+        white_balance="Auto",
+        focus_mode="AF-S",
+        metering_mode="Matrix",
+        exposure_program="Aperture priority",
+        flash="Off",
+    )
+    buckets: dict[int, list[PhotoRecord]] = {}
+    for index, (name, group_id, sharpness, portrait) in enumerate(demo_files):
+        path = folder / name
+        if not path.is_file():
+            continue
+        size = QImageReader(str(path)).size()
+        width = size.width() if size.isValid() else 1200
+        height = size.height() if size.isValid() else 800
+        photo = PhotoRecord(
+            path=path,
+            width=width,
+            height=height,
+            file_size=path.stat().st_size,
+            captured_at=datetime(2026, 5, 18, 9, 30 + group_id, index % 60),
+            dhash=group_id,
+            color_signature=neutral_signature,
+            sharpness=sharpness,
+            exposure=0.5 if "dark" not in name and "bright" not in name else 0.32,
+            average_hash=group_id,
+            metadata=metadata,
+            portrait_detected=portrait,
+            group_id=group_id,
+        )
+        buckets.setdefault(group_id, []).append(photo)
+    return [PhotoGroup(group_id, photos) for group_id, photos in sorted(buckets.items())]
 
 
 def _confirm_recoverable_trash(parent: QWidget, title: str, message: str) -> bool:
@@ -535,6 +704,7 @@ class PhotoCard(QFrame):
         self.feedback_timer = QTimer(self)
         self.feedback_timer.setSingleShot(True)
         self.feedback_timer.timeout.connect(self._clear_feedback)
+        self._thumbnail_request_id = 0
 
         layout = QHBoxLayout(self) if is_list else QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -679,10 +849,26 @@ class PhotoCard(QFrame):
         self._load_thumbnail()
 
     def _load_thumbnail(self) -> None:
-        image = _read_preview(
-            self.photo.path,
-            QSize(self.preview.width() * 2, self.preview.height() * 2),
-        )
+        self._thumbnail_request_id += 1
+        request_id = self._thumbnail_request_id
+        target = QSize(self.preview.width() * 2, self.preview.height() * 2)
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText("正在载入…")
+        cached = _get_cached_preview(self.photo.path, target)
+        if not cached.isNull():
+            self._set_thumbnail(cached)
+            return
+        task = PreviewLoadTask(request_id, self.photo.path, target)
+        task.signals.finished.connect(self._thumbnail_loaded)
+        _preview_pool().start(task, PREVIEW_PRIORITY_THUMBNAIL)
+
+    @Slot(int, object)
+    def _thumbnail_loaded(self, request_id: int, image: QImage) -> None:
+        if request_id != self._thumbnail_request_id:
+            return
+        self._set_thumbnail(image)
+
+    def _set_thumbnail(self, image: QImage) -> None:
         if image.isNull():
             self.preview.setText("无法预览")
             return
@@ -968,6 +1154,7 @@ class PhotoViewer(QDialog):
         self.group = group
         self.photos = group.photos
         self.index = start_index
+        self._preview_request_id = 0
         self.setObjectName("photoViewer")
         self.setWindowTitle("照片预览")
         self.setModal(True)
@@ -1175,14 +1362,39 @@ class PhotoViewer(QDialog):
 
     def _load_current(self) -> None:
         photo = self.photos[self.index]
+        self._preview_request_id += 1
+        request_id = self._preview_request_id
+        target = QSize(2048, 2048)
         self.image_area.set_loading()
-        QApplication.processEvents()
-        image = _read_preview(photo.path, QSize(4096, 4096))
+        self._refresh_current_details(photo)
+        cached = _get_cached_preview(photo.path, target)
+        if not cached.isNull():
+            self._set_loaded_preview(request_id, cached)
+            self._prefetch_neighbors()
+            return
+        task = PreviewLoadTask(request_id, photo.path, target)
+        task.signals.finished.connect(self._set_loaded_preview)
+        _preview_pool().start(task, PREVIEW_PRIORITY_VIEWER)
+        self._prefetch_neighbors()
+
+    def _prefetch_neighbors(self) -> None:
+        target = QSize(2048, 2048)
+        for offset in (1, -1, 2):
+            neighbor_index = self.index + offset
+            if 0 <= neighbor_index < len(self.photos):
+                photo = self.photos[neighbor_index]
+                if _get_cached_preview(photo.path, target).isNull():
+                    task = PreviewPrefetchTask(photo.path, target)
+                    _preview_pool().start(task, PREVIEW_PRIORITY_PREFETCH)
+
+    @Slot(int, object)
+    def _set_loaded_preview(self, request_id: int, image: QImage) -> None:
+        if request_id != self._preview_request_id:
+            return
         if image.isNull():
             self.image_area.set_error("无法预览此照片")
         else:
             self.image_area.set_photo(QPixmap.fromImage(image))
-        self._refresh_current_details(photo)
 
     def _refresh_current_details(self, photo: PhotoRecord) -> None:
         state = {
@@ -3017,7 +3229,17 @@ class MainWindow(QMainWindow):
             )
             return
         self._set_source(folder)
-        self._start_analysis()
+        groups = _demo_photo_groups(folder)
+        if not groups:
+            QMessageBox.information(self, "没有照片", "演示照片文件夹为空。")
+            return
+        self.groups = groups
+        self._apply_group_filter()
+        self._save_session_now()
+        self.statusBar().showMessage(
+            f"已载入 {sum(len(group.photos) for group in groups)} 张演示照片，文件操作会以模拟素材进行",
+            6000,
+        )
 
     def _set_source(self, folder: Path) -> None:
         folder = folder.resolve()
@@ -3071,6 +3293,7 @@ class MainWindow(QMainWindow):
         if self.analysis_thread and self.analysis_thread.isRunning():
             self.statusBar().showMessage("已有照片分析正在进行", 4000)
             return
+        self.content_stack.setCurrentIndex(2)
         try:
             paths = discover_images(self.source_folder)
         except OSError as exc:
@@ -3377,7 +3600,10 @@ class MainWindow(QMainWindow):
                 f"{row + 1} / {len(self.visible_groups)}  ·  {total} 张"
                 f"  ·  正在载入 {end}/{total}"
             )
-        QTimer.singleShot(0, lambda: self._render_card_batch(generation))
+        QTimer.singleShot(
+            PREVIEW_RENDER_DELAY_MS,
+            lambda: self._render_card_batch(generation),
+        )
 
     def _update_group_navigation(self) -> None:
         row = self.group_list.currentRow()

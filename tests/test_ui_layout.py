@@ -1,12 +1,15 @@
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QSize, QSettings, Qt, QThreadPool
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
@@ -18,10 +21,16 @@ from photo_fit_picker.ui import (
     PhotoCard,
     ZoomablePhotoArea,
     _clamped_thumbnail_size,
+    _cached_preview,
     _filtered_photo_groups,
+    _get_cached_preview,
     _normalized_sort_mode,
     _normalized_view_mode,
     _photo_grid_columns,
+    _preview_cache,
+    _preview_cache_lock,
+    _preview_locks,
+    _preview_pool,
     _sorted_group_photos,
 )
 
@@ -150,6 +159,80 @@ def test_grid_columns_follow_view_mode_and_available_width() -> None:
     assert _photo_grid_columns(900, "large", 268) == 3
     assert _photo_grid_columns(900, "list", 136) == 1
     assert _photo_grid_columns(40, "compact", 168) == 1
+
+
+def test_preview_cache_coalesces_concurrent_reads(tmp_path: Path) -> None:
+    image_path = tmp_path / "photo.jpg"
+    image_path.write_bytes(b"placeholder")
+    target = QSize(120, 80)
+    call_count = 0
+    call_lock = threading.Lock()
+
+    def fake_read(_path: Path, _target: QSize) -> QImage:
+        nonlocal call_count
+        time.sleep(0.02)
+        with call_lock:
+            call_count += 1
+        image = QImage(24, 16, QImage.Format.Format_RGB32)
+        image.fill(QColor("white"))
+        return image
+
+    with _preview_cache_lock:
+        _preview_cache.clear()
+        _preview_locks.clear()
+
+    with patch("photo_fit_picker.ui._read_preview", side_effect=fake_read):
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            images = list(
+                executor.map(lambda _: _cached_preview(image_path, target), range(8))
+            )
+
+    assert call_count == 1
+    assert all(not image.isNull() for image in images)
+    assert not _get_cached_preview(image_path, target).isNull()
+
+
+def test_preview_pool_is_dedicated_to_photo_loading() -> None:
+    pool = _preview_pool()
+
+    assert pool is not QThreadPool.globalInstance()
+    assert pool.maxThreadCount() == 3
+
+
+def test_demo_photos_load_prebuilt_groups_without_analysis(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("DemoPhotos")
+    QSettings().clear()
+    for name in (
+        "02_lake_bright.jpg",
+        "01_lake_clear.jpg",
+        "03_lake_soft.jpg",
+        "04_street_clear.jpg",
+        "05_street_step.jpg",
+        "06_street_dark.jpg",
+        "07_coast_clear.jpg",
+        "08_coast_shift.jpg",
+        "09_coast_soft.jpg",
+        "10_forest.jpg",
+        "11_abstract.jpg",
+    ):
+        pixmap = QPixmap(24, 16)
+        pixmap.fill(QColor("white"))
+        assert pixmap.save(str(tmp_path / name), "JPG")
+
+    window = MainWindow()
+    with (
+        patch("photo_fit_picker.ui._prepare_demo_folder", return_value=tmp_path),
+        patch.object(window, "_start_analysis", side_effect=AssertionError),
+    ):
+        window._load_demo_photos()
+
+    assert len(window.groups) == 5
+    assert sum(len(group.photos) for group in window.groups) == 11
+    assert window.analysis_thread is None
+    window.close()
+    QSettings().clear()
 
 
 def test_singleton_groups_can_be_excluded_from_every_review_filter() -> None:
