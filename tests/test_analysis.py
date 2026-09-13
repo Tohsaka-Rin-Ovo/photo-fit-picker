@@ -443,5 +443,53 @@ class AnalysisTests(unittest.TestCase):
         self.assertLessEqual(similarity.call_count, len(photos))
 
 
+class AnalysisWorkerCountTest(unittest.TestCase):
+    def test_balanced_mode_keeps_conservative_limits(self) -> None:
+        self.assertEqual(
+            analysis_module.analysis_worker_count(
+                100, memory_heavy=True, detect_portraits=False,
+                performance_mode="balanced", cpu_count=8,
+            ),
+            2,
+        )
+        self.assertEqual(
+            analysis_module.analysis_worker_count(
+                100, memory_heavy=False, detect_portraits=False,
+                performance_mode="balanced", cpu_count=8,
+            ),
+            4,
+        )
+        self.assertEqual(
+            analysis_module.analysis_worker_count(
+                1, memory_heavy=False, detect_portraits=False,
+                performance_mode="balanced", cpu_count=8,
+            ),
+            2,
+        )
+
+    def test_high_performance_mode_uses_all_cores(self) -> None:
+        self.assertEqual(
+            analysis_module.analysis_worker_count(
+                100, memory_heavy=True, detect_portraits=True,
+                performance_mode="high", cpu_count=8,
+            ),
+            8,
+        )
+        self.assertEqual(
+            analysis_module.analysis_worker_count(
+                3, memory_heavy=False, detect_portraits=False,
+                performance_mode="high", cpu_count=8,
+            ),
+            3,
+        )
+        self.assertEqual(
+            analysis_module.analysis_worker_count(
+                100, memory_heavy=False, detect_portraits=False,
+                performance_mode="high", cpu_count=2,
+            ),
+            2,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

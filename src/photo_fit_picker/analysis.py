@@ -449,12 +449,30 @@ def extract_feature(path: Path, detect_portraits: bool = False) -> PhotoRecord:
     )
 
 
+def analysis_worker_count(
+    pending_count: int,
+    memory_heavy: bool,
+    detect_portraits: bool,
+    performance_mode: str = "balanced",
+    cpu_count: Optional[int] = None,
+) -> int:
+    if cpu_count is None:
+        cpu_count = os.cpu_count() or 2
+    if performance_mode == "high":
+        worker_limit = max(2, cpu_count)
+    else:
+        worker_limit = 2 if memory_heavy or detect_portraits else 4
+        worker_limit = max(2, min(worker_limit, cpu_count // 2))
+    return max(2, min(max(1, pending_count), worker_limit))
+
+
 def analyze_paths(
     paths: Sequence[Path],
     progress: Optional[Callable[[int, int, str], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
     cache: Optional[FeatureCache] = None,
     detect_portraits: bool = False,
+    performance_mode: str = "balanced",
 ) -> tuple[list[PhotoRecord], list[tuple[Path, str]]]:
     if not paths:
         return [], []
@@ -481,10 +499,11 @@ def analyze_paths(
         path.suffix.lower() in MEMORY_HEAVY_EXTENSIONS
         for _, path, _ in pending
     )
-    worker_limit = 2 if memory_heavy or detect_portraits else 4
-    worker_count = min(
+    worker_count = analysis_worker_count(
         len(pending),
-        max(2, min(worker_limit, (os.cpu_count() or 2) // 2)),
+        memory_heavy,
+        detect_portraits,
+        performance_mode,
     )
     executor = ThreadPoolExecutor(
         max_workers=worker_count,

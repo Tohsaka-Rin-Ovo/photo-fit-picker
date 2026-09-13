@@ -56,14 +56,22 @@ class EngineClient {
     return typeof selected === "string" ? selected : null;
   }
 
+  async chooseFolders(): Promise<string[] | null> {
+    if (!isTauri()) return null;
+    const selected = await open({ directory: true, multiple: true });
+    if (!selected) return null;
+    const list = Array.isArray(selected) ? selected : [selected];
+    return list.length ? list : null;
+  }
+
   async demoFolder(): Promise<string | null> {
     return isTauri() ? invoke<string>("demo_folder") : null;
   }
 
-  async startAnalysis(source: string, options: AnalysisOptions): Promise<string> {
+  async startAnalysis(sources: string[], options: AnalysisOptions): Promise<string> {
     const result = await this.request<{ job_id: string }>("/api/analyze", {
       method: "POST",
-      body: JSON.stringify({ source, options }),
+      body: JSON.stringify({ sources, options }),
     });
     return result.job_id;
   }

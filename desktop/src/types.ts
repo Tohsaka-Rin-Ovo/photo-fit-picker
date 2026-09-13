@@ -65,6 +65,15 @@ export interface AnalysisOptions {
   exposure_weight: number;
   resolution_weight: number;
   detect_portraits: boolean;
+  performance_mode: "balanced" | "high";
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  folders: string[];
+  createdAt: string;
+  lastOpenedAt: string;
 }
 
 export interface Preferences {
@@ -85,6 +94,7 @@ export interface AnalysisJob {
   total: number;
   detail: string;
   source: string;
+  sources?: string[];
   failure_count: number;
   error?: string;
   groups?: PhotoGroup[];

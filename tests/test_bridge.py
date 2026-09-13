@@ -89,6 +89,76 @@ def test_engine_undo_restores_record_path_and_status(tmp_path: Path) -> None:
     assert image_path.is_file()
 
 
+def test_engine_analyzes_multiple_source_folders(tmp_path: Path) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    Image.new("RGB", (320, 240), (50, 120, 180)).save(left / "a.jpg")
+    Image.new("RGB", (320, 240), (10, 200, 60)).save(right / "b.jpg")
+
+    engine = EngineState(tmp_path / "state")
+    job = engine.start_analysis([left, right], {"similarity_threshold": 0.7})
+    snapshot = _wait_for_job(engine, job.id)
+
+    assert snapshot["state"] == "completed"
+    assert sorted(snapshot["sources"]) == sorted(
+        [str(left.resolve()), str(right.resolve())]
+    )
+    assert sum(group["count"] for group in snapshot["groups"]) == 2
+    assert engine.sources == [left.resolve(), right.resolve()]
+
+
+def test_engine_nested_source_folders_are_deduplicated(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    inner.mkdir(parents=True)
+    Image.new("RGB", (160, 120), (80, 90, 100)).save(inner / "photo.jpg")
+
+    engine = EngineState(tmp_path / "state")
+    job = engine.start_analysis([outer, inner], {})
+    snapshot = _wait_for_job(engine, job.id)
+
+    assert snapshot["state"] == "completed"
+    assert sum(group["count"] for group in snapshot["groups"]) == 1
+
+
+def test_engine_missing_source_folder_raises(tmp_path: Path) -> None:
+    engine = EngineState(tmp_path / "state")
+    with pytest.raises(FileNotFoundError):
+        engine.start_analysis([tmp_path / "missing"], {})
+
+
+def test_engine_restores_review_state_across_folders(tmp_path: Path) -> None:
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    Image.new("RGB", (160, 120), (80, 90, 100)).save(left / "kept.jpg")
+    Image.new("RGB", (160, 120), (10, 20, 30)).save(right / "pending.jpg")
+
+    data_root = tmp_path / "state"
+    engine = EngineState(data_root)
+    snapshot = _wait_for_job(engine, engine.start_analysis([left, right], {}).id)
+    by_name = {
+        photo["name"]: photo["id"]
+        for group in snapshot["groups"]
+        for photo in group["photos"]
+    }
+    engine.update_review([{"id": by_name["kept.jpg"], "status": "kept"}])
+
+    reopened = EngineState(data_root)
+    second_job = reopened.start_analysis([left, right], {})
+    second = _wait_for_job(reopened, second_job.id)
+    statuses = {
+        photo["name"]: photo["status"]
+        for group in second["groups"]
+        for photo in group["photos"]
+    }
+    assert statuses["kept.jpg"] == "kept"
+    assert statuses["pending.jpg"] == "pending"
+
+
 def test_http_engine_rejects_missing_token(tmp_path: Path) -> None:
     try:
         server = create_server(0, "test-token", tmp_path / "state")

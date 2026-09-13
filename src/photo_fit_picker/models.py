@@ -36,6 +36,7 @@ class AnalysisOptions:
     exposure_weight: float = 0.25
     resolution_weight: float = 0.0
     detect_portraits: bool = False
+    performance_mode: str = "balanced"
 
 
 @dataclass(frozen=True)

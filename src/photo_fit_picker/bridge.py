@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from PIL import Image
@@ -65,7 +65,45 @@ def _analysis_options(payload: object) -> AnalysisOptions:
             0.0, float(values.get("resolution_weight", defaults.resolution_weight))
         ),
         detect_portraits=bool(values.get("detect_portraits", defaults.detect_portraits)),
+        performance_mode=(
+            "high" if values.get("performance_mode") == "high" else "balanced"
+        ),
     )
+
+
+def _normalize_sources(sources: object) -> list[Path]:
+    if isinstance(sources, (str, Path)):
+        candidates = [sources]
+    elif isinstance(sources, list):
+        candidates = [item for item in sources if isinstance(item, (str, Path)) and str(item)]
+    else:
+        candidates = []
+    if not candidates:
+        raise ValueError("必须提供至少一个照片文件夹")
+
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for item in candidates:
+        folder = Path(str(item)).expanduser().resolve()
+        if folder in seen:
+            continue
+        seen.add(folder)
+        if not folder.is_dir():
+            raise FileNotFoundError(f"找不到照片文件夹：{folder}")
+        resolved.append(folder)
+
+    # 嵌套选择的文件夹（父文件夹包含子文件夹）只保留最外层，避免重复扫描。
+    return [
+        folder
+        for folder in resolved
+        if not any(other != folder and other in folder.parents for other in resolved)
+    ]
+
+
+def _sources_label(sources: Sequence[Path]) -> str:
+    if len(sources) == 1:
+        return str(sources[0])
+    return f"{sources[0].name} 等 {len(sources)} 个文件夹"
 
 
 def _metadata_payload(photo: PhotoRecord) -> dict[str, object]:
@@ -119,7 +157,7 @@ def _group_payload(group: PhotoGroup) -> dict[str, object]:
 @dataclass
 class AnalysisJob:
     id: str
-    source: Path
+    sources: tuple[Path, ...]
     options: AnalysisOptions
     state: str = "queued"
     stage: str = "scan"
@@ -139,7 +177,8 @@ class AnalysisJob:
             "current": self.current,
             "total": self.total,
             "detail": self.detail,
-            "source": str(self.source),
+            "source": _sources_label(self.sources),
+            "sources": [str(folder) for folder in self.sources],
             "failure_count": len(self.failures),
         }
         if self.error:
@@ -161,15 +200,13 @@ class EngineState:
         self.thumbnail_root = data_root / "thumbnails"
         self.jobs: dict[str, AnalysisJob] = {}
         self.records: dict[str, PhotoRecord] = {}
-        self.source: Optional[Path] = None
+        self.sources: list[Path] = []
         self.lock = threading.RLock()
 
-    def start_analysis(self, source: Path, options_payload: object) -> AnalysisJob:
-        source = source.expanduser().resolve()
-        if not source.is_dir():
-            raise FileNotFoundError(f"找不到照片文件夹：{source}")
+    def start_analysis(self, sources: object, options_payload: object) -> AnalysisJob:
+        folders = _normalize_sources(sources)
         options = _analysis_options(options_payload)
-        job = AnalysisJob(uuid.uuid4().hex, source, options)
+        job = AnalysisJob(uuid.uuid4().hex, tuple(folders), options)
         with self.lock:
             self.jobs[job.id] = job
         threading.Thread(
@@ -183,11 +220,18 @@ class EngineState:
     def _run_analysis(self, job: AnalysisJob) -> None:
         try:
             job.state = "running"
-            paths = discover_images(job.source)
+            paths: list[Path] = []
+            seen: set[Path] = set()
+            for folder in job.sources:
+                for path in discover_images(folder):
+                    key = path.resolve()
+                    if key not in seen:
+                        seen.add(key)
+                        paths.append(path)
             job.total = len(paths)
             job.detail = f"找到 {len(paths)} 张照片"
             if not paths:
-                raise ValueError("该文件夹中没有找到支持的照片")
+                raise ValueError("所选文件夹中没有找到支持的照片")
 
             job.stage = "features"
 
@@ -202,6 +246,7 @@ class EngineState:
                 cancelled=job.cancel_event.is_set,
                 cache=self.feature_cache,
                 detect_portraits=job.options.detect_portraits,
+                performance_mode=job.options.performance_mode,
             )
             if job.cancel_event.is_set():
                 job.state = "cancelled"
@@ -228,9 +273,10 @@ class EngineState:
                 job.detail = "已取消分析"
                 return
 
-            self.session_store.restore(job.source, records)
+            for folder in job.sources:
+                self.session_store.restore(folder, records)
             with self.lock:
-                self.source = job.source
+                self.sources = list(job.sources)
                 self.records = {_photo_id(record.path): record for record in records}
                 job.groups = groups
                 job.failures = failures
@@ -259,6 +305,10 @@ class EngineState:
             if job.state == "queued":
                 job.state = "cancelled"
 
+    def _save_sessions(self) -> None:
+        for folder in self.sources:
+            self.session_store.save(folder, self.records.values())
+
     def update_review(self, updates: object) -> dict[str, int]:
         if not isinstance(updates, list):
             raise ValueError("审核状态必须是列表")
@@ -281,8 +331,7 @@ class EngineState:
                 photo.status = status
                 photo.selected = False
                 changed += 1
-            if self.source:
-                self.session_store.save(self.source, self.records.values())
+            self._save_sessions()
         return {"changed": changed}
 
     def move(self, photo_ids: object, destination: Path) -> dict[str, object]:
@@ -290,8 +339,7 @@ class EngineState:
         if not photos:
             raise ValueError("没有选择照片")
         moved = move_photos(photos, destination.expanduser().resolve())
-        if self.source:
-            self.session_store.save(self.source, self.records.values())
+        self._save_sessions()
         return {
             "moved_files": len(moved),
             "entries": [asdict(entry) for entry in moved],
@@ -306,8 +354,7 @@ class EngineState:
         trashed: list[str] = []
         for photo in photos:
             trashed.append(str(move_photo_to_trash(photo)))
-        if self.source:
-            self.session_store.save(self.source, self.records.values())
+        self._save_sessions()
         return {"trashed_files": len(trashed), "paths": trashed}
 
     def undo(self, destination: Path) -> dict[str, object]:
@@ -323,8 +370,7 @@ class EngineState:
                     record.status = ReviewStatus(entry.previous_status)
                 except ValueError:
                     record.status = ReviewStatus.PENDING
-            if self.source:
-                self.session_store.save(self.source, self.records.values())
+            self._save_sessions()
         return {
             "restored_files": len(restored),
             "errors": errors,
@@ -473,10 +519,8 @@ class EngineRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._json_body()
             if self.path == "/api/analyze":
-                job = self.engine.start_analysis(
-                    Path(str(payload.get("source", ""))),
-                    payload.get("options"),
-                )
+                sources = payload["sources"] if "sources" in payload else payload.get("source")
+                job = self.engine.start_analysis(sources, payload.get("options"))
                 self._send_json(HTTPStatus.ACCEPTED, {"job_id": job.id})
                 return
             if self.path == "/api/cancel":
