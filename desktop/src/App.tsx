@@ -101,7 +101,7 @@ const ONBOARDING_STEPS: Array<{ icon: ReactNode; title: string; body: string }> 
   {
     icon: <FolderPlus size={30} />,
     title: "用项目整理文件夹",
-    body: "一个项目对应一次文件夹整理，创建时可以一次选择多个文件夹，之后还能随时添加。再次打开项目时，上次的筛选进度会自动恢复。",
+    body: "一个项目对应一次文件夹整理，创建时可以一次选择多个文件夹并给项目起一个名字，之后还能随时添加。再次打开项目时，上次的筛选进度会自动恢复。",
   },
   {
     icon: <Columns2 size={30} />,
@@ -143,6 +143,12 @@ function sourcesLabel(folders: string[]): string {
   if (!folders.length) return "";
   if (folders.length === 1) return folders[0];
   return `${folderBasename(folders[0])} 等 ${folders.length} 个文件夹`;
+}
+
+function defaultProjectName(folders: string[]): string {
+  if (!folders.length) return "照片项目";
+  const base = folderBasename(folders[0]);
+  return folders.length === 1 ? base : `${base} 等 ${folders.length} 个文件夹`;
 }
 
 type SettingsSection = "general" | "folders" | "analysis" | "experiments" | "about";
@@ -607,12 +613,14 @@ function CompareViewer({ photos, leftId, rightId, onClose, onSideChange, onSwap,
         <ComparePanel
           photo={left}
           photos={photos}
+          otherId={right.id}
           onChange={(photo) => onSideChange("left", photo)}
           onReview={onReview}
         />
         <ComparePanel
           photo={right}
           photos={photos}
+          otherId={left.id}
           onChange={(photo) => onSideChange("right", photo)}
           onReview={onReview}
         />
@@ -621,23 +629,29 @@ function CompareViewer({ photos, leftId, rightId, onClose, onSideChange, onSwap,
   );
 }
 
-function ComparePanel({ photo, photos, onChange, onReview }: {
+function ComparePanel({ photo, photos, otherId, onChange, onReview }: {
   photo: Photo;
   photos: Photo[];
+  otherId: string;
   onChange: (photo: Photo) => void;
   onReview: (photo: Photo, status: ReviewStatus) => void;
 }) {
   const index = photos.findIndex((item) => item.id === photo.id);
-  const shift = (step: number) => {
-    const next = photos[index + step];
-    if (next) onChange(next);
+  const neighbor = (step: number): Photo | null => {
+    for (let cursor = index + step; cursor >= 0 && cursor < photos.length; cursor += step) {
+      if (photos[cursor].id !== otherId) return photos[cursor];
+    }
+    return null;
   };
+  const prev = neighbor(-1);
+  const next = neighbor(1);
   return (
     <section className="compare-panel">
       <div className="compare-media">
-        <button type="button" className="icon-button stage-arrow is-prev" aria-label="上一张" disabled={index <= 0} onClick={() => shift(-1)}><ArrowLeft size={20} /></button>
+        <button type="button" className="icon-button stage-arrow is-prev" aria-label="上一张" disabled={!prev} onClick={() => prev && onChange(prev)}><ArrowLeft size={20} /></button>
         <Thumbnail photo={photo} maximum={1600} />
-        <button type="button" className="icon-button stage-arrow is-next" aria-label="下一张" disabled={index >= photos.length - 1} onClick={() => shift(1)}><ArrowRight size={20} /></button>
+        <button type="button" className="icon-button stage-arrow is-next" aria-label="下一张" disabled={!next} onClick={() => next && onChange(next)}><ArrowRight size={20} /></button>
+        <span className="compare-position">{index + 1} / {photos.length}</span>
       </div>
       <div className="compare-meta">
         <div className="compare-meta-heading">
@@ -716,6 +730,49 @@ function OnboardingLayer({ step, onStep, onFinish }: {
               {!isLast ? <ArrowRight size={16} /> : null}
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectNameDialog({
+  title,
+  hint,
+  value,
+  confirmLabel,
+  onChange,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  hint: string;
+  value: string;
+  confirmLabel: string;
+  onChange: (value: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
+      <div className="confirm-dialog" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+        <h2>{title}</h2>
+        <p className="dialog-hint" title={hint}>{hint}</p>
+        <input
+          className="rename-input"
+          type="text"
+          value={value}
+          autoFocus
+          onFocus={(event) => event.currentTarget.select()}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") onConfirm();
+            if (event.key === "Escape") onCancel();
+          }}
+        />
+        <div className="dialog-actions">
+          <button className="button secondary" type="button" onClick={onCancel}>取消</button>
+          <button className="button primary" type="button" onClick={onConfirm}>{confirmLabel}</button>
         </div>
       </div>
     </div>
@@ -878,6 +935,7 @@ function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<Project | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [creating, setCreating] = useState<{ folders: string[]; name: string } | null>(null);
   const [onboardingStep, setOnboardingStep] = useState<number | null>(() =>
     localStorage.getItem(ONBOARDING_STORAGE_KEY) ? null : 0,
   );
@@ -1025,14 +1083,22 @@ function App() {
     }
     const folders = await engine.chooseFolders();
     if (!folders) return;
+    setCreating({ folders, name: defaultProjectName(folders) });
+  };
+
+  const confirmCreateProject = async () => {
+    if (!creating) return;
+    const { folders } = creating;
+    const name = creating.name.trim() || defaultProjectName(folders);
     const now = new Date().toISOString();
     const project: Project = {
       id: `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      name: sourcesLabel(folders) || "照片项目",
+      name,
       folders,
       createdAt: now,
       lastOpenedAt: now,
     };
+    setCreating(null);
     setProjects((current) => [project, ...current]);
     setActiveProjectId(project.id);
     setDemoMode(false);
@@ -1330,6 +1396,13 @@ function App() {
                 <strong>{activeProject.name}</strong>
                 <small>{activeProject.folders.length === 1 ? activeProject.folders[0] : `${activeProject.folders.length} 个文件夹`}</small>
               </div>
+              <button
+                type="button"
+                className="icon-button project-rename"
+                aria-label={`重命名 ${activeProject.name}`}
+                title="重命名项目"
+                onClick={() => { setRenaming(activeProject); setRenameValue(activeProject.name); }}
+              ><Pencil size={14} /></button>
             </div>
             <button
               className="add-folder-button"
@@ -1511,26 +1584,29 @@ function App() {
       )}
 
       {renaming && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setRenaming(null)}>
-          <div className="confirm-dialog" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-            <h2>重命名项目</h2>
-            <input
-              className="rename-input"
-              type="text"
-              value={renameValue}
-              autoFocus
-              onChange={(event) => setRenameValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") confirmRename();
-                if (event.key === "Escape") setRenaming(null);
-              }}
-            />
-            <div className="dialog-actions">
-              <button className="button secondary" type="button" onClick={() => setRenaming(null)}>取消</button>
-              <button className="button primary" type="button" onClick={confirmRename}>保存</button>
-            </div>
-          </div>
-        </div>
+        <ProjectNameDialog
+          title="重命名项目"
+          hint={renaming.folders.length === 1 ? renaming.folders[0] : `项目包含 ${renaming.folders.length} 个文件夹`}
+          value={renameValue}
+          confirmLabel="保存"
+          onChange={setRenameValue}
+          onCancel={() => setRenaming(null)}
+          onConfirm={confirmRename}
+        />
+      )}
+
+      {creating && (
+        <ProjectNameDialog
+          title="为新的整理项目命名"
+          hint={creating.folders.length === 1
+            ? `将整理文件夹：${creating.folders[0]}`
+            : `将整理 ${creating.folders.length} 个文件夹：${creating.folders.map(folderBasename).join("、")}`}
+          value={creating.name}
+          confirmLabel="创建项目并开始分析"
+          onChange={(name) => setCreating((current) => (current ? { ...current, name } : current))}
+          onCancel={() => setCreating(null)}
+          onConfirm={() => void confirmCreateProject()}
+        />
       )}
 
       {confirmAction && (
