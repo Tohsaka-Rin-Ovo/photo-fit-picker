@@ -126,6 +126,25 @@ def test_portrait_detection_setting_updates_analysis_options() -> None:
     QSettings().clear()
 
 
+def test_kook_theme_is_available_and_persisted() -> None:
+    app = QApplication.instance() or QApplication([])
+    app.setOrganizationName("PhotoFitPickerTests")
+    app.setApplicationName("KookThemeSetting")
+    QSettings().clear()
+    window = MainWindow()
+    combo = window.settings_view.theme_combo
+    kook_index = combo.findData("kook")
+
+    assert kook_index >= 0
+    combo.setCurrentIndex(kook_index)
+    app.processEvents()
+
+    assert QSettings().value("appearance/theme") == "kook"
+    assert "#7acc35" in app.styleSheet()
+    window.close()
+    QSettings().clear()
+
+
 def test_grid_columns_follow_view_mode_and_available_width() -> None:
     assert _photo_grid_columns(900, "compact", 168) == 4
     assert _photo_grid_columns(900, "large", 268) == 3

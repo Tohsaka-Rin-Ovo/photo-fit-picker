@@ -66,7 +66,52 @@ PALETTES: dict[str, dict[str, str]] = {
         "overlay": "rgba(27, 28, 31, 224)",
         "scroll": "#b6b7bd",
     },
+    "kook": {
+        "canvas": "#15171a",
+        "workspace": "#1a1c20",
+        "sidebar": "#202328",
+        "surface": "#23262b",
+        "surface_raised": "#292d32",
+        "surface_hover": "#31363c",
+        "surface_pressed": "#394047",
+        "border": "#363b41",
+        "border_strong": "#505860",
+        "text": "#f7f8f6",
+        "text_secondary": "#cdd1cb",
+        "text_muted": "#929990",
+        "disabled": "#6b726a",
+        "accent": "#7acc35",
+        "accent_hover": "#8ad545",
+        "accent_pressed": "#67b52c",
+        "accent_soft": "#293a22",
+        "accent_text": "#c7f1a4",
+        "green": "#7acc35",
+        "green_soft": "#293a22",
+        "red": "#ff6f77",
+        "red_soft": "#4b2c31",
+        "amber": "#f3c85c",
+        "amber_soft": "#4b4022",
+        "image": "#111315",
+        "overlay": "rgba(17, 19, 21, 232)",
+        "scroll": "#66864f",
+    },
 }
+
+THEME_ALIASES = {"graphite": "light", "black": "dark"}
+DARK_THEMES = {"dark", "kook"}
+
+
+def normalize_theme(mode: object) -> str:
+    normalized = THEME_ALIASES.get(str(mode), str(mode))
+    return normalized if normalized in PALETTES else "light"
+
+
+def is_dark_theme(mode: object) -> bool:
+    return normalize_theme(mode) in DARK_THEMES
+
+
+def theme_colors(mode: object) -> Mapping[str, str]:
+    return PALETTES[normalize_theme(mode)]
 
 
 def _render(template: str, colors: Mapping[str, str]) -> str:
@@ -762,9 +807,38 @@ QDialog#photoViewer #primaryButton {
 """
 
 
+THEME_STYLESHEETS = {
+    "kook": r"""
+#settingsNavButton:checked, #settingsButton:checked {
+    color: @accent_text;
+    background: @accent_soft;
+}
+#analysisPanel {
+    border-left: 4px solid @accent;
+}
+#batchBar {
+    border-left: 4px solid @accent;
+}
+QListWidget::item:selected, #organizationPhotoList::item:selected {
+    color: @text;
+    background: @accent_soft;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: @scroll;
+}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
+    background: @accent;
+}
+""",
+}
+
+
 def apply_unified_theme(app: QApplication, mode: str) -> None:
-    mode = "dark" if mode == "dark" else "light"
+    mode = normalize_theme(mode)
     colors = PALETTES[mode]
+    stylesheet = _render(STYLESHEET, colors)
+    if mode in THEME_STYLESHEETS:
+        stylesheet += _render(THEME_STYLESHEETS[mode], colors)
     app.setStyle("Fusion")
     app.setPalette(_qt_palette(colors))
-    app.setStyleSheet(_render(STYLESHEET, colors))
+    app.setStyleSheet(stylesheet)

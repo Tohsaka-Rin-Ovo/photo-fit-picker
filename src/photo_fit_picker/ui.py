@@ -92,7 +92,12 @@ from .models import (
 )
 from .organizer import OrganizationGroup, OrganizationPlan, build_organization_plan
 from .session import ReviewSessionStore, ReviewSessionSummary
-from .theme import apply_unified_theme
+from .theme import (
+    apply_unified_theme,
+    is_dark_theme,
+    normalize_theme,
+    theme_colors,
+)
 from .worker import AnalysisWorker
 
 
@@ -221,7 +226,7 @@ def _reduced_motion() -> bool:
 
 def _theme_setting(settings: QSettings) -> str:
     value = str(settings.value("appearance/theme", "light"))
-    return {"graphite": "light", "black": "dark"}.get(value, value)
+    return normalize_theme(value)
 
 
 def _sync_macos_appearance(mode: str) -> None:
@@ -255,7 +260,9 @@ def _sync_macos_appearance(mode: str) -> None:
         appearance_name = send_string(
             ns_string,
             objc.sel_registerName(b"stringWithUTF8String:"),
-            b"NSAppearanceNameDarkAqua" if mode == "dark" else b"NSAppearanceNameAqua",
+            b"NSAppearanceNameDarkAqua"
+            if is_dark_theme(mode)
+            else b"NSAppearanceNameAqua",
         )
         appearance = send_pointer(
             ns_appearance,
@@ -394,7 +401,7 @@ class _RippleFeedback:
             if self.owner.objectName() in {"primaryButton", "emptyPrimaryButton"}
             else (
                 QColor(255, 255, 255)
-                if _theme_setting(QSettings()) == "dark"
+                if is_dark_theme(_theme_setting(QSettings()))
                 else QColor(44, 57, 68)
             )
         )
@@ -445,16 +452,16 @@ class SelectionCheckBox(QCheckBox):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         box = QRectF(3, 3, 20, 20)
-        dark = _theme_setting(QSettings()) == "dark"
+        colors = theme_colors(_theme_setting(QSettings()))
         if not self.isEnabled():
-            painter.setPen(QPen(QColor("#686970"), 1.5))
-            painter.setBrush(QColor("#303136" if dark else "#e1e1e5"))
+            painter.setPen(QPen(QColor(colors["disabled"]), 1.5))
+            painter.setBrush(QColor(colors["surface_pressed"]))
         elif self.isChecked():
-            painter.setPen(QPen(QColor("#d6eaff"), 1.5))
-            painter.setBrush(QColor("#43c982" if dark else "#228754"))
+            painter.setPen(QPen(QColor(colors["accent_text"]), 1.5))
+            painter.setBrush(QColor(colors["green"]))
         else:
-            painter.setPen(QPen(QColor("#b9bac1" if not dark else "#b3b4bb"), 1.5))
-            painter.setBrush(QColor("#ffffff" if not dark else "#111214"))
+            painter.setPen(QPen(QColor(colors["text_secondary"]), 1.5))
+            painter.setBrush(QColor(colors["surface"]))
         painter.drawRoundedRect(box, 5, 5)
         if self.isChecked():
             painter.setPen(
@@ -483,12 +490,10 @@ class SettingsSwitch(QCheckBox):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = QRectF(1, 2, 40, 20)
         painter.setPen(Qt.PenStyle.NoPen)
-        if self.isChecked():
-            track_color = QColor("#2f9b69")
-        elif _theme_setting(QSettings()) == "dark":
-            track_color = QColor("#3a3e43")
-        else:
-            track_color = QColor("#c8ced3")
+        colors = theme_colors(_theme_setting(QSettings()))
+        track_color = QColor(
+            colors["green"] if self.isChecked() else colors["surface_pressed"]
+        )
         painter.setBrush(track_color)
         painter.drawRoundedRect(track, 10, 10)
         knob_x = 21 if self.isChecked() else 3
@@ -1561,6 +1566,7 @@ class SettingsView(QWidget):
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("明亮", "light")
         self.theme_combo.addItem("深色", "dark")
+        self.theme_combo.addItem("KOOK 绿", "kook")
         saved_theme = _theme_setting(self.preferences)
         self.theme_combo.setCurrentIndex(max(0, self.theme_combo.findData(saved_theme)))
         self.theme_combo.currentIndexChanged.connect(self._theme_changed)
