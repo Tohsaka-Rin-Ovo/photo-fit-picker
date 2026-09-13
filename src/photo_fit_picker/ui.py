@@ -222,7 +222,10 @@ def _read_preview(path: Path, target: QSize) -> QImage:
     reader = QImageReader(str(path))
     reader.setAutoTransform(True)
     original_size = reader.size()
-    if original_size.isValid():
+    if original_size.isValid() and (
+        original_size.width() > target.width()
+        or original_size.height() > target.height()
+    ):
         original_size.scale(target, Qt.AspectRatioMode.KeepAspectRatio)
         reader.setScaledSize(original_size)
     image = reader.read()
@@ -509,7 +512,10 @@ class PhotoCard(QFrame):
         self.action_panel = QFrame(preview_frame)
         self.action_panel.setObjectName("cardActions")
         self.action_panel.setFixedSize(76, 36)
-        self.action_panel.move(preview_width - 86, preview_height - 46)
+        self.action_panel.move(
+            10 if is_list else preview_width - 86,
+            preview_height - 46,
+        )
         action_layout = QHBoxLayout(self.action_panel)
         action_layout.setContentsMargins(2, 2, 2, 2)
         action_layout.setSpacing(4)
@@ -722,6 +728,158 @@ class PreviewLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class ZoomImageLabel(QLabel):
+    double_clicked = Signal()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.double_clicked.emit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class ZoomablePhotoArea(QScrollArea):
+    zoom_changed = Signal(int)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("viewerImageScroll")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setWidgetResizable(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label = ZoomImageLabel()
+        self.image_label.setObjectName("viewerImage")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setMinimumSize(1, 1)
+        self.image_label.double_clicked.connect(self.toggle_actual_size)
+        self.setWidget(self.image_label)
+        self._original_pixmap = QPixmap()
+        self._scale_factor = 1.0
+        self._fit_mode = True
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(40)
+        self._resize_timer.timeout.connect(self.fit_to_window)
+
+    @property
+    def zoom_percent(self) -> int:
+        return round(self._scale_factor * 100)
+
+    @property
+    def fit_mode(self) -> bool:
+        return self._fit_mode
+
+    def set_loading(self) -> None:
+        self._original_pixmap = QPixmap()
+        self.image_label.setPixmap(QPixmap())
+        self.image_label.setText("正在载入高清预览…")
+        self.image_label.resize(
+            max(1, self.viewport().width()),
+            max(1, self.viewport().height()),
+        )
+
+    def set_error(self, message: str) -> None:
+        self._original_pixmap = QPixmap()
+        self.image_label.setPixmap(QPixmap())
+        self.image_label.setText(message)
+        self.image_label.resize(
+            max(1, self.viewport().width()),
+            max(1, self.viewport().height()),
+        )
+        self.zoom_changed.emit(100)
+
+    def set_photo(self, pixmap: QPixmap) -> None:
+        self._original_pixmap = pixmap
+        self.image_label.setText("")
+        self.fit_to_window()
+
+    def _fit_scale(self) -> float:
+        if self._original_pixmap.isNull():
+            return 1.0
+        available = self.maximumViewportSize()
+        available_width = max(1, available.width() - 8)
+        available_height = max(1, available.height() - 8)
+        return min(
+            1.0,
+            available_width / self._original_pixmap.width(),
+            available_height / self._original_pixmap.height(),
+        )
+
+    def _maximum_scale(self) -> float:
+        if self._original_pixmap.isNull():
+            return 1.0
+        largest_dimension = max(
+            self._original_pixmap.width(),
+            self._original_pixmap.height(),
+        )
+        return max(1.0, min(4.0, 8192 / max(1, largest_dimension)))
+
+    def _set_scale(self, scale: float, *, fit_mode: bool = False) -> None:
+        if self._original_pixmap.isNull():
+            return
+        old_width = max(1, self.image_label.width())
+        old_height = max(1, self.image_label.height())
+        center_x = (
+            self.horizontalScrollBar().value() + self.viewport().width() / 2
+        ) / old_width
+        center_y = (
+            self.verticalScrollBar().value() + self.viewport().height() / 2
+        ) / old_height
+        self._scale_factor = max(0.05, min(self._maximum_scale(), scale))
+        self._fit_mode = fit_mode
+        target = self._original_pixmap.size() * self._scale_factor
+        scaled = self._original_pixmap.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(scaled)
+        self.image_label.resize(scaled.size())
+        self.horizontalScrollBar().setValue(
+            round(center_x * scaled.width() - self.viewport().width() / 2)
+        )
+        self.verticalScrollBar().setValue(
+            round(center_y * scaled.height() - self.viewport().height() / 2)
+        )
+        self.zoom_changed.emit(self.zoom_percent)
+
+    def fit_to_window(self) -> None:
+        self._set_scale(self._fit_scale(), fit_mode=True)
+
+    def actual_size(self) -> None:
+        self._set_scale(1.0)
+
+    def zoom_in(self) -> None:
+        self._set_scale(self._scale_factor * 1.25)
+
+    def zoom_out(self) -> None:
+        self._set_scale(self._scale_factor / 1.25)
+
+    def toggle_actual_size(self) -> None:
+        if self._original_pixmap.isNull():
+            return
+        if abs(self._scale_factor - 1.0) < 0.02 and not self._fit_mode:
+            self.fit_to_window()
+        else:
+            self.actual_size()
+
+    def wheelEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.angleDelta().y() > 0:
+                self.zoom_in()
+            elif event.angleDelta().y() < 0:
+                self.zoom_out()
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        super().resizeEvent(event)
+        if self._fit_mode and not self._original_pixmap.isNull():
+            self._resize_timer.start()
+
+
 class PhotoViewer(QDialog):
     status_changed = Signal()
     trash_requested = Signal(object)
@@ -747,15 +905,10 @@ class PhotoViewer(QDialog):
         layout.setSpacing(10)
         body = QHBoxLayout()
         body.setSpacing(12)
-        self.image_label = QLabel()
-        self.image_label.setObjectName("viewerImage")
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setMinimumSize(640, 400)
-        self.image_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Expanding,
-        )
-        body.addWidget(self.image_label, 1)
+        self.image_area = ZoomablePhotoArea()
+        self.image_area.setMinimumSize(400, 320)
+        self.image_label = self.image_area.image_label
+        body.addWidget(self.image_area, 1)
 
         inspector_scroll = QScrollArea()
         inspector_scroll.setObjectName("viewerInspectorScroll")
@@ -814,6 +967,37 @@ class PhotoViewer(QDialog):
         self.info_label = QLabel()
         self.info_label.setObjectName("viewerInfo")
         controls.addWidget(self.info_label, 1)
+
+        self.zoom_out_button = FeedbackToolButton()
+        self.zoom_out_button.setObjectName("viewerZoomButton")
+        self.zoom_out_button.setIcon(_icon("magnify-minus-outline"))
+        self.zoom_out_button.setIconSize(QSize(18, 18))
+        self.zoom_out_button.setToolTip("缩小")
+        self.zoom_out_button.clicked.connect(self.image_area.zoom_out)
+        controls.addWidget(self.zoom_out_button)
+        self.zoom_label = QLabel("100%")
+        self.zoom_label.setObjectName("viewerZoomLabel")
+        self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_label.setFixedWidth(52)
+        self.image_area.zoom_changed.connect(
+            lambda percent: self.zoom_label.setText(f"{percent}%")
+        )
+        controls.addWidget(self.zoom_label)
+        self.zoom_in_button = FeedbackToolButton()
+        self.zoom_in_button.setObjectName("viewerZoomButton")
+        self.zoom_in_button.setIcon(_icon("magnify-plus-outline"))
+        self.zoom_in_button.setIconSize(QSize(18, 18))
+        self.zoom_in_button.setToolTip("放大")
+        self.zoom_in_button.clicked.connect(self.image_area.zoom_in)
+        controls.addWidget(self.zoom_in_button)
+        self.fit_button = FeedbackToolButton()
+        self.fit_button.setObjectName("viewerZoomButton")
+        self.fit_button.setIcon(_icon("fit-to-screen-outline"))
+        self.fit_button.setIconSize(QSize(18, 18))
+        self.fit_button.setToolTip("适合窗口")
+        self.fit_button.clicked.connect(self.image_area.fit_to_window)
+        controls.addWidget(self.fit_button)
+
         self.trash_button = FeedbackToolButton()
         self.trash_button.setObjectName("trashButton")
         self.trash_button.setIcon(_icon("trash-can-outline", ICON_DANGER))
@@ -837,15 +1021,15 @@ class PhotoViewer(QDialog):
             QShortcut(QKeySequence(Qt.Key.Key_Right), self),
             QShortcut(QKeySequence("K"), self),
             QShortcut(QKeySequence("X"), self),
+            QShortcut(QKeySequence.StandardKey.ZoomIn, self),
+            QShortcut(QKeySequence.StandardKey.ZoomOut, self),
         ]
         self.shortcuts[0].activated.connect(self._previous)
         self.shortcuts[1].activated.connect(self._next)
         self.shortcuts[2].activated.connect(lambda: self._set_status(ReviewStatus.KEPT))
         self.shortcuts[3].activated.connect(lambda: self._set_status(ReviewStatus.REJECTED))
-        self.resize_timer = QTimer(self)
-        self.resize_timer.setSingleShot(True)
-        self.resize_timer.setInterval(90)
-        self.resize_timer.timeout.connect(self._load_current)
+        self.shortcuts[4].activated.connect(self.image_area.zoom_in)
+        self.shortcuts[5].activated.connect(self.image_area.zoom_out)
         self._load_current()
 
     def _metadata_rows(self, photo: PhotoRecord) -> list[tuple[str, str]]:
@@ -906,16 +1090,16 @@ class PhotoViewer(QDialog):
 
     def _load_current(self) -> None:
         photo = self.photos[self.index]
-        target = self.image_label.size()
-        if target.width() < 100 or target.height() < 100:
-            target = QSize(1000, 650)
-        image = _read_preview(photo.path, target)
+        self.image_area.set_loading()
+        QApplication.processEvents()
+        image = _read_preview(photo.path, QSize(4096, 4096))
         if image.isNull():
-            self.image_label.setPixmap(QPixmap())
-            self.image_label.setText("无法预览此照片")
+            self.image_area.set_error("无法预览此照片")
         else:
-            self.image_label.setText("")
-            self.image_label.setPixmap(QPixmap.fromImage(image))
+            self.image_area.set_photo(QPixmap.fromImage(image))
+        self._refresh_current_details(photo)
+
+    def _refresh_current_details(self, photo: PhotoRecord) -> None:
         state = {
             ReviewStatus.PENDING: "待审核",
             ReviewStatus.KEPT: "已保留",
@@ -950,16 +1134,11 @@ class PhotoViewer(QDialog):
             return
         photo.status = ReviewStatus.PENDING if photo.status == status else status
         self.status_changed.emit()
-        self._load_current()
+        self._refresh_current_details(photo)
 
     def _request_trash(self) -> None:
         self.trash_requested.emit(self.photos[self.index])
-        self._load_current()
-
-    def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        super().resizeEvent(event)
-        if hasattr(self, "resize_timer"):
-            self.resize_timer.start()
+        self._refresh_current_details(self.photos[self.index])
 
 
 class OrganizationView(QWidget):
@@ -1895,6 +2074,7 @@ class MainWindow(QMainWindow):
         status = QStatusBar()
         self.progress = QProgressBar()
         self.progress.setFixedWidth(220)
+        self.progress.setTextVisible(False)
         self.progress.hide()
         status.addPermanentWidget(self.progress)
         self.cancel_analysis_button = FeedbackToolButton()
@@ -2299,6 +2479,7 @@ class MainWindow(QMainWindow):
         analysis_layout.addStretch()
         self.analysis_panel = QFrame()
         self.analysis_panel.setObjectName("analysisPanel")
+        self.analysis_panel.setMinimumWidth(480)
         self.analysis_panel.setMaximumWidth(560)
         panel_layout = QVBoxLayout(self.analysis_panel)
         panel_layout.setContentsMargins(28, 26, 28, 24)

@@ -549,6 +549,22 @@ QScrollBar::handle:vertical:hover {
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
 }
+QScrollBar:horizontal {
+    height: 10px;
+    margin: 2px;
+    background: transparent;
+}
+QScrollBar::handle:horizontal {
+    min-width: 28px;
+    background: @scroll;
+    border-radius: 4px;
+}
+QScrollBar::handle:horizontal:hover {
+    background: @border_strong;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
 QMenu {
     padding: 5px;
     color: @text;
@@ -678,11 +694,27 @@ QMessageBox #destructiveButton {
 QDialog#photoViewer {
     background: @workspace;
 }
-QDialog#photoViewer #viewerImage {
-    color: @text_muted;
+QDialog#photoViewer #viewerImageScroll,
+QDialog#photoViewer #viewerImageScroll > QWidget > QWidget {
     background: @image;
     border: 1px solid @border;
     border-radius: 6px;
+}
+QDialog#photoViewer #viewerImage {
+    color: @text_muted;
+    background: @image;
+    border: 0;
+}
+QDialog#photoViewer #viewerZoomLabel {
+    color: @text_muted;
+    font-size: 12px;
+}
+QDialog#photoViewer #viewerZoomButton {
+    min-width: 32px;
+    max-width: 32px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0;
 }
 QDialog#photoViewer #viewerInspectorScroll,
 QDialog#photoViewer #viewerInspector {
