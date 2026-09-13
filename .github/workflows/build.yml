@@ -12,6 +12,7 @@ on:
       - main
     tags:
       - "v*"
+      - "!v*-alpha.*"
 
 permissions:
   contents: write
