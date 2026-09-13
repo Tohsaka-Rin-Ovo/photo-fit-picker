@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 photo-fit-picker = "photo_fit_picker.main:main"
+photo-fit-picker-engine = "photo_fit_picker.bridge:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
