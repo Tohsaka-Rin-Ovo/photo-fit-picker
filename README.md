@@ -15,7 +15,7 @@
 - 明亮、深色与 KOOK 绿三套统一主题；不会因深色模式留下明亮标题遮罩。
 - 分析进度、取消、操作反馈、新一轮筛选和强制二次确认的回收站流程。
 
-预览分支推送后，GitHub Actions 中的 `Build Tauri preview` 会分别生成 macOS DMG 与 Windows 安装程序。验证通过前不会覆盖稳定版 Release。
+预览分支推送后，GitHub Actions 中的 `Build Tauri preview` 会分别生成 macOS DMG 与 Windows 安装程序。推送形如 `v0.8.0-alpha.1` 的标签会自动创建对应的 GitHub 预发布版；验证通过前不会覆盖稳定版 Release。
 
 ## 下载
 
@@ -133,7 +133,7 @@ chmod +x scripts/build-macos.sh
 
 Windows：双击 `scripts\build-windows.bat`，或在命令提示符中运行它。
 
-GitHub Actions 配置位于 `.github/workflows/build.yml`。手动运行工作流会生成临时构建产物；填写 `release_tag` 或推送 `v*` 标签时会新建或更新 GitHub Release，上传 Windows 安装程序、macOS DMG 和 SHA-256 校验文件。PyInstaller 必须在目标操作系统上构建，因此不能只在 Mac 上直接生成可靠的 Windows 程序。
+稳定版 GitHub Actions 配置位于 `.github/workflows/build.yml`；0.8 预览版配置位于 `.github/workflows/tauri-next.yml`。预览分支推送后会生成临时构建产物；手动填写 `release_tag` 或推送 `v0.8.0-alpha.*` 标签会创建 GitHub 预发布版，上传 Windows 安装程序、macOS DMG 和 SHA-256 校验文件。PyInstaller 必须在目标操作系统上构建，因此不能只在 Mac 上直接生成可靠的 Windows 程序。
 
 ## 第一版算法边界
 
