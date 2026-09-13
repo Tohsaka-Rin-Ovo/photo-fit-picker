@@ -17,6 +17,7 @@ import {
   Info,
   Leaf,
   List,
+  ListChecks,
   Maximize2,
   Moon,
   MoveRight,
@@ -883,7 +884,15 @@ function App() {
           <>
             <div className="group-summary">
               <p><strong>{activeGroup.count} 张相似照片</strong><span>推荐依据：清晰度、曝光与照片尺寸</span></p>
-              <button className="button primary subtle" type="button" disabled={busy} onClick={keepBestAndNext}><Sparkles size={16} />保留推荐并继续</button>
+              <div className="group-actions">
+                <button className="text-action" type="button" onClick={() => setSelected((current) => {
+                  const next = new Set(current);
+                  const allSelected = activeGroup.photos.every((photo) => next.has(photo.id));
+                  activeGroup.photos.forEach((photo) => allSelected ? next.delete(photo.id) : next.add(photo.id));
+                  return next;
+                })}><ListChecks size={16} />{activeGroup.photos.every((photo) => selected.has(photo.id)) ? "取消本组" : "全选本组"}</button>
+                <button className="button primary subtle" type="button" disabled={busy} onClick={keepBestAndNext}><Sparkles size={16} />保留推荐并继续</button>
+              </div>
             </div>
             <VirtualPhotoView photos={photos} mode={preferences.viewMode} thumbnailSize={preferences.viewMode === "large" ? Math.max(280, preferences.thumbnailSize) : preferences.thumbnailSize} selected={selected} onToggle={(id) => setSelected((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; })} onOpen={setDetail} />
           </>
