@@ -539,7 +539,7 @@ function SettingsPage({ preferences, destination, section, onSection, onChange, 
           {section === "about" && (
             <section className="settings-section about-section">
               <div className="about-mark"><ImageIcon size={32} /></div>
-              <h2>拾影</h2><p>本地优先的照片筛选工作台</p><span>0.8.0-alpha.2 · Tauri + React</span>
+              <h2>拾影</h2><p>本地优先的照片筛选工作台</p><span>0.8.0-alpha.3 · Tauri + React</span>
               <div className="safety-note"><ShieldCheck size={20} /><div><strong>只在本机处理</strong><p>图片内容和相机参数不会上传。RAW 文件只读取预览与元数据，原文件不会被改写。</p></div></div>
             </section>
           )}
