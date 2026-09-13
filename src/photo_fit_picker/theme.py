@@ -9,90 +9,90 @@ from PySide6.QtWidgets import QApplication
 
 PALETTES: dict[str, dict[str, str]] = {
     "dark": {
-        "canvas": "#1b1c1f",
-        "workspace": "#202125",
-        "sidebar": "#27282c",
-        "surface": "#292a2f",
-        "surface_raised": "#303136",
-        "surface_hover": "#37383e",
-        "surface_pressed": "#404148",
-        "border": "#3a3b41",
-        "border_strong": "#505159",
-        "text": "#f2f2f4",
-        "text_secondary": "#b3b4bb",
-        "text_muted": "#85868e",
-        "disabled": "#686970",
-        "accent": "#0a84ff",
-        "accent_hover": "#3198ff",
-        "accent_pressed": "#0874df",
-        "accent_soft": "#183b5e",
-        "accent_text": "#d6eaff",
-        "green": "#43c982",
-        "green_soft": "#1f4432",
-        "red": "#ff696f",
-        "red_soft": "#512b30",
-        "amber": "#ffd16a",
-        "amber_soft": "#594719",
-        "image": "#111214",
-        "overlay": "rgba(24, 25, 28, 224)",
-        "scroll": "#55565e",
+        "canvas": "#17191c",
+        "workspace": "#17191c",
+        "sidebar": "#1d2024",
+        "surface": "#202327",
+        "surface_raised": "#292d31",
+        "surface_hover": "#30353a",
+        "surface_pressed": "#383d44",
+        "border": "#34383e",
+        "border_strong": "#444950",
+        "text": "#eef0f3",
+        "text_secondary": "#c2c7cf",
+        "text_muted": "#a5abb3",
+        "disabled": "#7f858d",
+        "accent": "#5a9cff",
+        "accent_hover": "#70a9ff",
+        "accent_pressed": "#438cff",
+        "accent_soft": "#253a57",
+        "accent_text": "#a9ccff",
+        "green": "#65cf98",
+        "green_soft": "#274438",
+        "red": "#ff7373",
+        "red_soft": "#492c30",
+        "amber": "#ffd166",
+        "amber_soft": "#493d24",
+        "image": "#111315",
+        "overlay": "rgba(17, 19, 21, 220)",
+        "scroll": "#555c65",
     },
     "light": {
-        "canvas": "#f2f2f4",
-        "workspace": "#f7f7f8",
-        "sidebar": "#e9e9ec",
+        "canvas": "#f7f8fa",
+        "workspace": "#f7f8fa",
+        "sidebar": "#eef1f4",
         "surface": "#ffffff",
         "surface_raised": "#ffffff",
-        "surface_hover": "#e2e2e6",
-        "surface_pressed": "#d7d7dc",
-        "border": "#d4d4d9",
-        "border_strong": "#b9bac1",
+        "surface_hover": "#f0f2f5",
+        "surface_pressed": "#e6e9ee",
+        "border": "#dfe3e8",
+        "border_strong": "#cdd3da",
         "text": "#202124",
-        "text_secondary": "#55565d",
-        "text_muted": "#777880",
-        "disabled": "#a4a5ab",
-        "accent": "#007aff",
-        "accent_hover": "#006ee6",
-        "accent_pressed": "#0062cc",
-        "accent_soft": "#dcecff",
-        "accent_text": "#15558f",
-        "green": "#228754",
-        "green_soft": "#def2e7",
-        "red": "#c6424d",
-        "red_soft": "#f8e0e2",
-        "amber": "#8a6412",
-        "amber_soft": "#fff0c7",
+        "text_secondary": "#505761",
+        "text_muted": "#717780",
+        "disabled": "#969ca5",
+        "accent": "#1677ff",
+        "accent_hover": "#0f6ee8",
+        "accent_pressed": "#075bc2",
+        "accent_soft": "#e9f2ff",
+        "accent_text": "#075bc2",
+        "green": "#1e8e5a",
+        "green_soft": "#e7f6ee",
+        "red": "#d83b3b",
+        "red_soft": "#fff0f0",
+        "amber": "#9a6a12",
+        "amber_soft": "#fff4d4",
         "image": "#151619",
-        "overlay": "rgba(27, 28, 31, 224)",
-        "scroll": "#b6b7bd",
+        "overlay": "rgba(27, 35, 45, 212)",
+        "scroll": "#b8c0ca",
     },
     "kook": {
-        "canvas": "#15171a",
-        "workspace": "#1a1c20",
-        "sidebar": "#202328",
-        "surface": "#23262b",
-        "surface_raised": "#292d32",
-        "surface_hover": "#31363c",
-        "surface_pressed": "#394047",
-        "border": "#363b41",
-        "border_strong": "#505860",
-        "text": "#f7f8f6",
-        "text_secondary": "#cdd1cb",
-        "text_muted": "#929990",
-        "disabled": "#6b726a",
+        "canvas": "#1c1f1d",
+        "workspace": "#1c1f1d",
+        "sidebar": "#202420",
+        "surface": "#252925",
+        "surface_raised": "#2d322d",
+        "surface_hover": "#30352f",
+        "surface_pressed": "#394038",
+        "border": "#383e37",
+        "border_strong": "#4a5248",
+        "text": "#f1f3f0",
+        "text_secondary": "#cdd3c9",
+        "text_muted": "#adb4aa",
+        "disabled": "#838b80",
         "accent": "#7acc35",
         "accent_hover": "#8ad545",
         "accent_pressed": "#67b52c",
-        "accent_soft": "#293a22",
-        "accent_text": "#c7f1a4",
-        "green": "#7acc35",
-        "green_soft": "#293a22",
-        "red": "#ff6f77",
-        "red_soft": "#4b2c31",
+        "accent_soft": "#304423",
+        "accent_text": "#a5e66e",
+        "green": "#8bda52",
+        "green_soft": "#304423",
+        "red": "#ff7770",
+        "red_soft": "#4b302f",
         "amber": "#f3c85c",
         "amber_soft": "#4b4022",
         "image": "#111315",
-        "overlay": "rgba(17, 19, 21, 232)",
+        "overlay": "rgba(17, 19, 21, 220)",
         "scroll": "#66864f",
     },
 }
@@ -162,6 +162,7 @@ def _qt_palette(colors: Mapping[str, str]) -> QPalette:
 STYLESHEET = r"""
 QWidget {
     color: @text;
+    font-family: Inter, "Noto Sans SC", "PingFang SC", "Segoe UI", sans-serif;
     font-size: 13px;
 }
 QMainWindow, #rootStack, #appRoot, #emptyState, #reviewWorkspace,
@@ -196,7 +197,7 @@ QScrollArea, QScrollArea > QWidget > QWidget {
 #sourceLabel, #photoSecondaryDetails, #resumeDetail, #settingsSectionHint,
 #settingsRowHint, #organizationSummary, #organizationGroupMeta,
 #viewerMetadataLabel, #viewerMetadataValue, #viewerReason {
-    font-size: 12px;
+    font-size: 11px;
 }
 #sectionTitle {
     color: @text_muted;
@@ -214,7 +215,7 @@ QScrollArea, QScrollArea > QWidget > QWidget {
 #emptyTitle {
     margin-top: 8px;
     color: @text;
-    font-size: 22px;
+    font-size: 28px;
     font-weight: 600;
 }
 #emptyHint {
@@ -229,7 +230,7 @@ QScrollArea, QScrollArea > QWidget > QWidget {
     background: @workspace;
 }
 #analysisPanel {
-    background: @surface;
+    background: @surface_raised;
     border: 1px solid @border;
     border-radius: 8px;
 }
@@ -258,10 +259,10 @@ QScrollArea, QScrollArea > QWidget > QWidget {
 QPushButton, QComboBox, QSpinBox, QToolButton, QLineEdit {
     min-height: 34px;
     padding: 0 11px;
-    color: @text_secondary;
+    color: @text;
     background: @surface_raised;
     border: 1px solid @border;
-    border-radius: 6px;
+    border-radius: 7px;
 }
 QPushButton:hover, QToolButton:hover {
     color: @text;
@@ -335,13 +336,15 @@ QToolButton {
 }
 #sidebarButton, #settingsButton, #sidebarUtilityButton, #settingsBackButton,
 #settingsNavButton {
-    min-height: 38px;
+    min-height: 39px;
     padding-left: 10px;
     text-align: left;
+    border-radius: 7px;
 }
 #settingsButton:checked, #settingsNavButton:checked {
     color: @text;
-    background: @surface_pressed;
+    background: @surface_raised;
+    border: 1px solid @border;
 }
 #quietButton {
     min-height: 32px;
@@ -421,8 +424,9 @@ QListWidget::item:selected {
     min-height: 32px;
     max-height: 32px;
     padding: 0;
-    background: @surface_raised;
+    background: @surface_hover;
     border: 1px solid @border;
+    border-radius: 7px;
 }
 #viewSizeSlider {
     min-height: 24px;
@@ -432,38 +436,38 @@ QListWidget::item:selected {
     max-height: 5px;
 }
 #photoCard {
-    background: @surface;
-    border: 1px solid @border;
+    background: transparent;
+    border: 1px solid transparent;
     border-radius: 7px;
 }
 #photoCard:hover {
     background: @surface_raised;
-    border-color: @border_strong;
+    border-color: @border;
 }
 #photoCard[selected="true"] {
-    background: @surface_raised;
-    border: 2px solid @accent;
+    background: @accent_soft;
+    border: 1px solid @accent;
 }
 #photoCard[reviewStatus="kept"] {
     background: @green_soft;
-    border: 2px solid @green;
+    border: 1px solid @green;
 }
 #photoCard[reviewStatus="kept"][selected="true"] {
-    border: 2px solid @accent;
+    border: 1px solid @accent;
 }
 #photoCard[reviewStatus="rejected"] {
-    background: @surface;
+    background: transparent;
     border-color: @border;
 }
 #photoCard[reviewStatus="trashed"] {
-    background: @surface;
+    background: transparent;
     border: 1px dashed @border_strong;
 }
 #photoCard[feedback="true"] {
-    border: 2px solid @accent;
+    border: 1px solid @accent;
 }
 #previewFrame {
-    background: @image;
+    background: @surface_hover;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
 }
@@ -479,17 +483,17 @@ QListWidget::item:selected {
     font-weight: 600;
 }
 #recommendBadge {
-    color: @amber;
-    background: @amber_soft;
+    color: #ffffff;
+    background: @accent;
     border-radius: 5px;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
 }
 #portraitBadge {
-    color: @accent_text;
-    background: @accent_soft;
+    color: #ffffff;
+    background: @overlay;
     border-radius: 5px;
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
 }
 #cardActions {
@@ -544,15 +548,15 @@ QListWidget::item:selected {
     border-color: @red;
 }
 #batchBar {
-    min-height: 48px;
-    max-height: 48px;
-    background: @accent_soft;
-    border: 1px solid @accent;
-    border-radius: 7px;
+    min-height: 56px;
+    max-height: 56px;
+    background: @surface_raised;
+    border: 1px solid @border_strong;
+    border-radius: 8px;
 }
 #batchCount {
     min-width: 88px;
-    color: @accent_text;
+    color: @text;
     font-weight: 600;
 }
 
@@ -653,7 +657,7 @@ QMenu::item:selected {
 #settingsSectionTitle {
     margin-top: 2px;
     color: @text;
-    font-size: 23px;
+    font-size: 26px;
     font-weight: 600;
 }
 #settingsSectionHint {
@@ -664,9 +668,9 @@ QMenu::item:selected {
     font-weight: 500;
 }
 #settingsGroup {
-    background: @surface;
-    border: 1px solid @border;
-    border-radius: 8px;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
 }
 #settingsDivider, #viewerDivider {
     max-height: 1px;
@@ -723,7 +727,7 @@ QSplitter::handle {
 QStatusBar {
     min-height: 22px;
     color: @text_muted;
-    background: @sidebar;
+    background: @workspace;
     border-top: 1px solid @border;
 }
 QToolTip {

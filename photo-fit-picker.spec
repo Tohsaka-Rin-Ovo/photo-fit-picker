@@ -67,7 +67,7 @@ if sys.platform == "darwin":
         name="拾影.app",
         icon="assets/app.icns",
         bundle_identifier="com.photofitpicker.app",
-        version="0.7.0",
+        version="0.9.0",
     )
 else:
     exe = EXE(

@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
 
+from photo_fit_picker import __version__
 from photo_fit_picker.models import PhotoGroup, PhotoRecord, ReviewStatus
 from photo_fit_picker.session import ReviewSessionStore
 from photo_fit_picker.ui import (
@@ -43,6 +44,10 @@ def test_view_preferences_are_normalized() -> None:
     assert _clamped_thumbnail_size("invalid") == 268
     assert _normalized_sort_mode("time") == "time"
     assert _normalized_sort_mode("unexpected") == "recommended"
+
+
+def test_application_version_is_090() -> None:
+    assert __version__ == "0.9.0"
 
 
 def test_group_photos_can_be_sorted_by_recommendation_time_and_size() -> None:
@@ -269,8 +274,11 @@ def test_singleton_groups_can_be_excluded_from_every_review_filter() -> None:
     QSettings().clear()
     window = MainWindow()
     window.groups = [singleton, similar]
-    window.settings_view.hide_singletons_toggle.setChecked(True)
 
+    assert window.hide_singleton_groups is True
+    window.settings_view.hide_singletons_toggle.setChecked(False)
+    assert QSettings().value("review/hide_singletons", type=bool) is False
+    window.settings_view.hide_singletons_toggle.setChecked(True)
     assert QSettings().value("review/hide_singletons", type=bool) is True
     assert window.hide_singleton_groups is True
     assert window.visible_groups == [similar]

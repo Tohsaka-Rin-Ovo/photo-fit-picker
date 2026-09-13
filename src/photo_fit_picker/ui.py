@@ -121,7 +121,7 @@ REVIEW_PRESETS = {
 }
 
 VIEW_MODES = {"compact", "large", "list"}
-VIEW_MODE_SIZES = {"compact": 168, "large": 268, "list": 136}
+VIEW_MODE_SIZES = {"compact": 210, "large": 268, "list": 136}
 SORT_MODES = {"recommended", "time", "size"}
 CARD_RENDER_BATCH_SIZE = 24
 PREVIEW_CACHE_LIMIT = 240
@@ -1946,7 +1946,7 @@ class SettingsView(QWidget):
         self.hide_singletons_toggle = SettingsSwitch()
         self.hide_singletons_toggle.setObjectName("settingsSwitch")
         self.hide_singletons_toggle.setChecked(
-            _setting_bool(self.preferences, "review/hide_singletons")
+            _setting_bool(self.preferences, "review/hide_singletons", True)
         )
         self.hide_singletons_toggle.toggled.connect(
             self._hide_singletons_changed
@@ -2207,7 +2207,7 @@ class SettingsView(QWidget):
 
         self.hide_singletons_toggle.blockSignals(True)
         self.hide_singletons_toggle.setChecked(
-            _setting_bool(self.preferences, "review/hide_singletons")
+            _setting_bool(self.preferences, "review/hide_singletons", True)
         )
         self.hide_singletons_toggle.blockSignals(False)
 
@@ -2367,11 +2367,11 @@ class MainWindow(QMainWindow):
         self.destination_folder: Optional[Path] = None
         self.similarity_threshold = 84
         self.time_window_seconds = 90
-        self.hide_singleton_groups = False
+        self.hide_singleton_groups = True
         self.analysis_options = AnalysisOptions()
         self.destination_mode = "source"
-        self.view_mode = "large"
-        self.thumbnail_size = VIEW_MODE_SIZES["large"]
+        self.view_mode = "compact"
+        self.thumbnail_size = VIEW_MODE_SIZES["compact"]
         self.sort_mode = "recommended"
         self._load_preferences()
         state_location = QStandardPaths.writableLocation(
@@ -2444,7 +2444,7 @@ class MainWindow(QMainWindow):
         self.sidebar = self._build_sidebar()
         self.main_splitter.addWidget(self.sidebar)
         self.main_splitter.addWidget(self._build_content())
-        self.main_splitter.setSizes([232, 1048])
+        self.main_splitter.setSizes([258, 1022])
         root_layout.addWidget(self.main_splitter, 1)
 
         self.root_stack.addWidget(self.workspace)
@@ -2489,6 +2489,7 @@ class MainWindow(QMainWindow):
         self.hide_singleton_groups = _setting_bool(
             self.preferences,
             "review/hide_singletons",
+            True,
         )
         self.analysis_options = AnalysisOptions(
             similarity_threshold=self.similarity_threshold / 100.0,
@@ -2519,7 +2520,7 @@ class MainWindow(QMainWindow):
             self.preferences.value("folders/destination_mode", "source")
         )
         self.view_mode = _normalized_view_mode(
-            self.preferences.value("view/mode", "large")
+            self.preferences.value("view/mode", "compact")
         )
         self.thumbnail_size = _clamped_thumbnail_size(
             self.preferences.value(
@@ -2545,8 +2546,8 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setMinimumWidth(224)
-        sidebar.setMaximumWidth(252)
+        sidebar.setMinimumWidth(238)
+        sidebar.setMaximumWidth(268)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(12, 18, 12, 12)
         layout.setSpacing(8)
