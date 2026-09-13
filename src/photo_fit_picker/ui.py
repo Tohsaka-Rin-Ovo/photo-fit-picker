@@ -24,6 +24,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QDragEnterEvent,
     QDropEvent,
@@ -105,6 +106,34 @@ REVIEW_PRESETS = {
     "balanced": (84, 90, 22),
     "relaxed": (78, 180, 30),
 }
+
+VIEW_MODES = {"compact", "large", "list"}
+VIEW_MODE_SIZES = {"compact": 168, "large": 268, "list": 136}
+
+
+def _normalized_view_mode(value: object) -> str:
+    mode = str(value)
+    return mode if mode in VIEW_MODES else "large"
+
+
+def _clamped_thumbnail_size(value: object) -> int:
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        size = VIEW_MODE_SIZES["large"]
+    return max(120, min(320, size))
+
+
+def _photo_grid_columns(
+    available_width: int,
+    view_mode: str,
+    thumbnail_size: int,
+    spacing: int = 16,
+) -> int:
+    if view_mode == "list":
+        return 1
+    card_width = _clamped_thumbnail_size(thumbnail_size)
+    return max(1, (max(0, available_width) + spacing) // (card_width + spacing))
 
 
 def _icon(
@@ -415,30 +444,44 @@ class PhotoCard(QFrame):
         self,
         photo: PhotoRecord,
         recommended: bool,
+        view_mode: str = "large",
+        thumbnail_size: int = VIEW_MODE_SIZES["large"],
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.photo = photo
         self.recommended = recommended
+        self.view_mode = _normalized_view_mode(view_mode)
+        self.thumbnail_size = _clamped_thumbnail_size(thumbnail_size)
+        is_list = self.view_mode == "list"
+        preview_width = self.thumbnail_size
+        preview_height = max(80, round(preview_width * 2 / 3))
         self.setObjectName("photoCard")
         self.setProperty("reviewStatus", photo.status.value)
-        self.setFixedWidth(268)
+        self.setProperty("viewMode", self.view_mode)
+        if is_list:
+            self.setMinimumWidth(420)
+            self.setFixedHeight(preview_height)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        else:
+            self.setFixedWidth(preview_width)
         self.feedback_timer = QTimer(self)
         self.feedback_timer.setSingleShot(True)
         self.feedback_timer.timeout.connect(self._clear_feedback)
 
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self) if is_list else QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         preview_frame = QFrame()
         preview_frame.setObjectName("previewFrame")
-        preview_frame.setFixedSize(268, 179)
+        preview_frame.setProperty("viewMode", self.view_mode)
+        preview_frame.setFixedSize(preview_width, preview_height)
         preview_layout = QVBoxLayout(preview_frame)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         self.preview = PreviewLabel("正在载入…")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview.setFixedSize(268, 179)
+        self.preview.setFixedSize(preview_width, preview_height)
         self.preview.setCursor(Qt.CursorShape.PointingHandCursor)
         self.preview.setToolTip("打开大图预览")
         self.preview.clicked.connect(lambda: self.open_requested.emit(self.photo))
@@ -450,7 +493,7 @@ class PhotoCard(QFrame):
         self.select_box.setToolTip("选择照片以执行批量操作")
         self.select_box.setChecked(photo.selected)
         self.select_box.setParent(preview_frame)
-        self.select_box.move(232, 10)
+        self.select_box.move(preview_width - 36, 10)
         self.select_box.stateChanged.connect(self._selection_changed)
         self.select_box.raise_()
 
@@ -466,7 +509,7 @@ class PhotoCard(QFrame):
         self.action_panel = QFrame(preview_frame)
         self.action_panel.setObjectName("cardActions")
         self.action_panel.setFixedSize(76, 36)
-        self.action_panel.move(182, 133)
+        self.action_panel.move(preview_width - 86, preview_height - 46)
         action_layout = QHBoxLayout(self.action_panel)
         action_layout.setContentsMargins(2, 2, 2, 2)
         action_layout.setSpacing(4)
@@ -495,7 +538,12 @@ class PhotoCard(QFrame):
         caption = QFrame()
         caption.setObjectName("photoCaption")
         caption_layout = QVBoxLayout(caption)
-        caption_layout.setContentsMargins(12, 10, 12, 11)
+        caption_layout.setContentsMargins(
+            16 if is_list else 12,
+            10,
+            16 if is_list else 12,
+            11,
+        )
         caption_layout.setSpacing(5)
         title_row = QHBoxLayout()
         title_row.setSpacing(8)
@@ -507,7 +555,7 @@ class PhotoCard(QFrame):
             name.fontMetrics().elidedText(
                 display_name,
                 Qt.TextElideMode.ElideMiddle,
-                164,
+                360 if is_list else max(72, preview_width - 104),
             )
         )
         name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -537,18 +585,24 @@ class PhotoCard(QFrame):
             secondary.fontMetrics().elidedText(
                 secondary_text,
                 Qt.TextElideMode.ElideRight,
-                240,
+                420 if is_list else max(90, preview_width - 28),
             )
         )
         secondary.setToolTip(secondary_text)
+        secondary.setVisible(self.view_mode != "compact")
         caption_layout.addWidget(secondary)
+        if is_list:
+            caption_layout.addStretch()
         layout.addWidget(caption)
 
         self.sync_status()
         self._load_thumbnail()
 
     def _load_thumbnail(self) -> None:
-        image = _read_preview(self.photo.path, QSize(536, 358))
+        image = _read_preview(
+            self.photo.path,
+            QSize(self.preview.width() * 2, self.preview.height() * 2),
+        )
         if image.isNull():
             self.preview.setText("无法预览")
             return
@@ -1754,6 +1808,8 @@ class MainWindow(QMainWindow):
         self.time_window_seconds = 90
         self.analysis_options = AnalysisOptions()
         self.destination_mode = "source"
+        self.view_mode = "large"
+        self.thumbnail_size = VIEW_MODE_SIZES["large"]
         self._load_preferences()
         state_location = QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.AppDataLocation
@@ -1780,6 +1836,10 @@ class MainWindow(QMainWindow):
         self.grid_resize_timer.setSingleShot(True)
         self.grid_resize_timer.setInterval(45)
         self.grid_resize_timer.timeout.connect(self._reflow_cards)
+        self.view_resize_timer = QTimer(self)
+        self.view_resize_timer.setSingleShot(True)
+        self.view_resize_timer.setInterval(120)
+        self.view_resize_timer.timeout.connect(self._rerender_current_group)
         self._build_shortcuts()
         self._show_empty_state()
 
@@ -1880,6 +1940,15 @@ class MainWindow(QMainWindow):
         )
         self.destination_mode = str(
             self.preferences.value("folders/destination_mode", "source")
+        )
+        self.view_mode = _normalized_view_mode(
+            self.preferences.value("view/mode", "large")
+        )
+        self.thumbnail_size = _clamped_thumbnail_size(
+            self.preferences.value(
+                "view/thumbnail_size",
+                VIEW_MODE_SIZES[self.view_mode],
+            )
         )
         custom_destination = str(
             self.preferences.value("folders/custom_destination", "")
@@ -2117,6 +2186,57 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.recommend_button)
         toolbar.addWidget(self.move_button)
         review_layout.addWidget(toolbar_frame)
+
+        view_controls = QFrame()
+        view_controls.setObjectName("viewControls")
+        view_layout = QHBoxLayout(view_controls)
+        view_layout.setContentsMargins(0, 0, 0, 0)
+        view_layout.setSpacing(8)
+        view_layout.addStretch()
+        size_small = QLabel()
+        size_small.setPixmap(_icon("image-outline", ICON_MUTED).pixmap(15, 15))
+        size_small.setToolTip("较小缩略图")
+        view_layout.addWidget(size_small)
+        self.view_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.view_size_slider.setObjectName("viewSizeSlider")
+        self.view_size_slider.setRange(120, 320)
+        self.view_size_slider.setValue(self.thumbnail_size)
+        self.view_size_slider.setFixedWidth(120)
+        self.view_size_slider.setToolTip(f"缩略图大小：{self.thumbnail_size}")
+        self.view_size_slider.valueChanged.connect(self._thumbnail_size_changed)
+        view_layout.addWidget(self.view_size_slider)
+        size_large = QLabel()
+        size_large.setPixmap(_icon("image-outline", ICON_MUTED).pixmap(21, 21))
+        size_large.setToolTip("较大缩略图")
+        view_layout.addWidget(size_large)
+
+        view_menu = QMenu(self)
+        self.view_action_group = QActionGroup(self)
+        self.view_action_group.setExclusive(True)
+        self.view_actions: dict[str, QAction] = {}
+        for label, mode in (
+            ("小图", "compact"),
+            ("大图", "large"),
+            ("文件列表", "list"),
+        ):
+            action = view_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(mode == self.view_mode)
+            action.triggered.connect(
+                lambda checked=False, selected=mode: self._set_view_mode(selected)
+            )
+            self.view_action_group.addAction(action)
+            self.view_actions[mode] = action
+        self.view_mode_button = FeedbackToolButton()
+        self.view_mode_button.setObjectName("viewModeButton")
+        self.view_mode_button.setIconSize(QSize(19, 19))
+        self.view_mode_button.setToolTip("照片视图")
+        self.view_mode_button.setAccessibleName("照片视图")
+        self.view_mode_button.setMenu(view_menu)
+        self.view_mode_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        view_layout.addWidget(self.view_mode_button)
+        self._sync_view_mode_button()
+        review_layout.addWidget(view_controls)
 
         self.photo_scroll = QScrollArea()
         self.photo_scroll.setWidgetResizable(True)
@@ -2699,6 +2819,47 @@ class MainWindow(QMainWindow):
         kept = f"  ·  保留 {group.kept_count}" if group.kept_count else ""
         return f"{marker}{group.id:02d}   {len(group.photos)} 张{kept}"
 
+    def _sync_view_mode_button(self) -> None:
+        icons = {
+            "compact": "view-grid-outline",
+            "large": "view-dashboard-outline",
+            "list": "format-list-bulleted",
+        }
+        labels = {"compact": "小图", "large": "大图", "list": "文件列表"}
+        self.view_mode_button.setIcon(_icon(icons[self.view_mode]))
+        self.view_mode_button.setToolTip(f"照片视图：{labels[self.view_mode]}")
+
+    def _set_view_mode(self, mode: str) -> None:
+        mode = _normalized_view_mode(mode)
+        self.view_mode = mode
+        self.thumbnail_size = VIEW_MODE_SIZES[mode]
+        self.preferences.setValue("view/mode", mode)
+        self.preferences.setValue("view/thumbnail_size", self.thumbnail_size)
+        self.view_actions[mode].setChecked(True)
+        self.view_size_slider.blockSignals(True)
+        self.view_size_slider.setValue(self.thumbnail_size)
+        self.view_size_slider.blockSignals(False)
+        self.view_size_slider.setToolTip(f"缩略图大小：{self.thumbnail_size}")
+        self._sync_view_mode_button()
+        self._rerender_current_group()
+
+    def _thumbnail_size_changed(self, value: int) -> None:
+        self.thumbnail_size = _clamped_thumbnail_size(value)
+        self.preferences.setValue("view/thumbnail_size", self.thumbnail_size)
+        self.view_size_slider.setToolTip(f"缩略图大小：{self.thumbnail_size}")
+        if hasattr(self, "view_resize_timer"):
+            self.view_resize_timer.start()
+
+    def _rerender_current_group(self) -> None:
+        row = self.group_list.currentRow()
+        if 0 <= row < len(self.visible_groups):
+            scroll_position = self.photo_scroll.verticalScrollBar().value()
+            self._show_group_at_row(row)
+            QTimer.singleShot(
+                0,
+                lambda: self.photo_scroll.verticalScrollBar().setValue(scroll_position),
+            )
+
     def _show_group_at_row(self, row: int) -> None:
         if row < 0 or row >= len(self.visible_groups):
             return
@@ -2709,10 +2870,26 @@ class MainWindow(QMainWindow):
             f"{row + 1} / {len(self.visible_groups)}  ·  {len(group.photos)} 张"
         )
         recommended = group.recommended
-        columns = max(1, self.photo_scroll.viewport().width() // 280)
+        columns = _photo_grid_columns(
+            self.photo_scroll.viewport().width(),
+            self.view_mode,
+            self.thumbnail_size,
+            self.photo_grid.horizontalSpacing(),
+        )
         self._grid_columns = columns
+        self.photo_grid.setAlignment(
+            Qt.AlignmentFlag.AlignTop
+            if self.view_mode == "list"
+            else Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        self.photo_grid.setColumnStretch(0, 1 if self.view_mode == "list" else 0)
         for index, photo in enumerate(group.photos):
-            card = PhotoCard(photo, photo is recommended)
+            card = PhotoCard(
+                photo,
+                photo is recommended,
+                self.view_mode,
+                self.thumbnail_size,
+            )
             card.status_changed.connect(self._review_changed)
             card.selection_changed.connect(self._selection_changed)
             card.open_requested.connect(self._open_viewer)
@@ -2745,7 +2922,12 @@ class MainWindow(QMainWindow):
     def _reflow_cards(self) -> None:
         if not self.cards:
             return
-        columns = max(1, self.photo_scroll.viewport().width() // 280)
+        columns = _photo_grid_columns(
+            self.photo_scroll.viewport().width(),
+            self.view_mode,
+            self.thumbnail_size,
+            self.photo_grid.horizontalSpacing(),
+        )
         if columns == self._grid_columns:
             return
         self._grid_columns = columns

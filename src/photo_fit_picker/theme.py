@@ -364,6 +364,24 @@ QListWidget::item:selected {
     background: transparent;
     border: 0;
 }
+#viewControls {
+    min-height: 34px;
+    max-height: 34px;
+    background: transparent;
+    border: 0;
+}
+#viewModeButton {
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 32px;
+    max-height: 32px;
+    padding: 0;
+    background: @surface_raised;
+    border: 1px solid @border;
+}
+#viewSizeSlider {
+    min-height: 24px;
+}
 #photoCard {
     background: @surface;
     border: 1px solid @border;
@@ -399,6 +417,10 @@ QListWidget::item:selected {
     background: @image;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
+}
+#previewFrame[viewMode="list"] {
+    border-top-right-radius: 0;
+    border-bottom-left-radius: 6px;
 }
 #photoCaption {
     background: transparent;
